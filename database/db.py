@@ -94,33 +94,5 @@ def buscar_usuario(id):
     conn.close()
     return dados
 
-def criar_tabela_mensagens():
-    conn = sqlite3.connect('usuarios.db')
-    c = conn.cursor()
-    c.execute('''
-        CREATE TABLE IF NOT EXISTS mensagens (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            usuario_id INTEGER NOT NULL,
-            mensagem TEXT NOT NULL,
-            canal TEXT,
-            data_envio TEXT,
-            FOREIGN KEY (usuario_id) REFERENCES usuarios(id)
-        )
-    ''')
-    conn.commit()
-    conn.close()
-
-
-def registrar_mensagem(usuario_id, mensagem, canal):
-    conn = sqlite3.connect('usuarios.db')
-    c = conn.cursor()
-    data_envio = datetime.now().strftime('%Y-%m-%d %H:%M:%S')
-    c.execute('''
-        INSERT INTO mensagens (usuario_id, mensagem, canal, data_envio)
-        VALUES (?, ?, ?, ?)
-    ''', (usuario_id, mensagem, canal, data_envio))
-    conn.commit()
-    conn.close()
-
 
 
