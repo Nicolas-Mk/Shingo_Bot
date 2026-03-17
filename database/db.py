@@ -93,6 +93,3 @@ def buscar_usuario(id):
     dados = c.fetchone()
     conn.close()
     return dados
-
-
-
