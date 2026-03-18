@@ -13,30 +13,30 @@ class UserProfileCog(commands.Cog):
 
     @app_commands.command(name="registrar", description="Registrar-se no sistema do bot")
     async def registrar(self, interaction: discord.Interaction):
-        user = interaction.user
-        registrado = UserManager.registrar_usuario(user.id, user.name, user.discriminator)
+        user     = interaction.user
+        guild_id = interaction.guild_id
+        registrado = UserManager.registrar_usuario(user.id, guild_id, user.name, user.discriminator)
         if registrado:
-            await interaction.response.send_message(
-                f'✅ {user.mention}, você foi registrado com sucesso!'
-            )
+            await interaction.response.send_message(f'✅ {user.mention}, você foi registrado com sucesso!')
         else:
-            await interaction.response.send_message(
-                f'⚠️ {user.mention}, você já está registrado!'
-            )
+            await interaction.response.send_message(f'⚠️ {user.mention}, você já está registrado!')
 
     def calcular_xp_necessario(self, nivel):
-        base = 50
+        base     = 50
         xp_total = base
         for i in range(1, nivel):
             mult = 0.10 + ((i - 1) // 10) * 0.05
             xp_total += xp_total * mult
         return int(xp_total)
 
-    def dar_xp(self, usuario_id, nome, discriminator):
-        conn = sqlite3.connect('usuarios.db')
-        c = conn.cursor()
-        c.execute("SELECT xp, nivel, ultimo_xp FROM usuarios WHERE id = ?", (usuario_id,))
-        row = c.fetchone()
+    def dar_xp(self, usuario_id, guild_id, nome, discriminator):
+        conn  = sqlite3.connect('usuarios.db')
+        c     = conn.cursor()
+        c.execute(
+            "SELECT xp, nivel, ultimo_xp FROM usuarios WHERE id = ? AND guild_id = ?",
+            (usuario_id, guild_id)
+        )
+        row   = c.fetchone()
         agora = time.time()
 
         if row:
@@ -52,10 +52,15 @@ class UserProfileCog(commands.Cog):
                     upou = True
 
                 if upou:
-                    c.execute("UPDATE usuarios SET flingers = flingers + 50 WHERE id = ?", (usuario_id,))
+                    c.execute(
+                        "UPDATE usuarios SET flingers = flingers + 50 WHERE id = ? AND guild_id = ?",
+                        (usuario_id, guild_id)
+                    )
 
-                c.execute("UPDATE usuarios SET xp = ?, nivel = ?, ultimo_xp = ? WHERE id = ?",
-                          (xp, nivel, agora, usuario_id))
+                c.execute(
+                    "UPDATE usuarios SET xp = ?, nivel = ?, ultimo_xp = ? WHERE id = ? AND guild_id = ?",
+                    (xp, nivel, agora, usuario_id, guild_id)
+                )
                 conn.commit()
                 conn.close()
                 return upou, nivel
@@ -63,10 +68,11 @@ class UserProfileCog(commands.Cog):
                 conn.close()
                 return False, nivel
         else:
+            # Usuário ainda não registrado neste servidor — cria o registro automaticamente
             c.execute("""
-                INSERT INTO usuarios (id, nome, discriminator, data_registro, descricao, xp, nivel, ultimo_xp)
-                VALUES (?, ?, ?, ?, '', 5, 1, ?)
-            """, (usuario_id, nome, discriminator,
+                INSERT INTO usuarios (id, guild_id, nome, discriminator, data_registro, descricao, xp, nivel, ultimo_xp)
+                VALUES (?, ?, ?, ?, ?, '', 5, 1, ?)
+            """, (usuario_id, guild_id, nome, discriminator,
                   discord.utils.utcnow().strftime('%Y-%m-%d %H:%M:%S'), agora))
             conn.commit()
             conn.close()
@@ -74,56 +80,47 @@ class UserProfileCog(commands.Cog):
 
     @commands.Cog.listener()
     async def on_message(self, message):
-        if message.author.bot:
+        if message.author.bot or not message.guild:
             return
 
-        user_id = message.author.id
-        nome = message.author.name
-        discriminator = message.author.discriminator
-
-        upou, nivel = self.dar_xp(user_id, nome, discriminator)
+        upou, nivel = self.dar_xp(
+            message.author.id,
+            message.guild.id,
+            message.author.name,
+            message.author.discriminator,
+        )
 
         if upou:
             await message.channel.send(
                 f"🎉 Parabéns, {message.author.mention}, você subiu para o nível {nivel} de fracasso! 💀"
             )
 
-        conn = sqlite3.connect('usuarios.db')
-        c = conn.cursor()
-        c.execute("SELECT id FROM usuarios WHERE id = ?", (user_id,))
-        conn.close()
-
     @app_commands.command(name="perfil", description="Ver seu perfil de registro")
     async def perfil(self, interaction: discord.Interaction):
-        user = interaction.user
-        conn = sqlite3.connect('usuarios.db')
-        c = conn.cursor()
+        user     = interaction.user
+        guild_id = interaction.guild_id
+        conn     = sqlite3.connect('usuarios.db')
+        c        = conn.cursor()
 
         c.execute("""
-            SELECT nome, discriminator, data_registro, descricao,
-                   xp, nivel, flingers 
-            FROM usuarios 
-            WHERE id = ?
-        """, (user.id,))
+            SELECT nome, discriminator, data_registro, descricao, xp, nivel, flingers
+            FROM usuarios
+            WHERE id = ? AND guild_id = ?
+        """, (user.id, guild_id))
 
         dados = c.fetchone()
         conn.close()
 
         if dados:
             nome, discriminator, data_registro, descricao, xp, nivel, flingers = dados
-
-            embed = discord.Embed(
-                title="📋 Perfil do Usuário",
-                color=discord.Color.blue()
-            )
+            embed = discord.Embed(title="📋 Perfil do Usuário", color=discord.Color.blue())
             embed.set_thumbnail(url=user.avatar.url if user.avatar else user.default_avatar.url)
-            embed.add_field(name="👤 Usuário", value=f"{nome}#{discriminator}", inline=False)
-            embed.add_field(name="📅 Registrado em", value=data_registro, inline=False)
-            embed.add_field(name="📝 Descrição", value=descricao or "Sem descrição definida", inline=False)
-            embed.add_field(name="📊 XP", value=f"{xp} XP", inline=True)
-            embed.add_field(name="🔝 Nível", value=f"{nivel}", inline=True)
-            embed.add_field(name="💰 Flingers", value=f"{flingers}", inline=True)
-
+            embed.add_field(name="👤 Usuário",      value=f"{nome}#{discriminator}",          inline=False)
+            embed.add_field(name="📅 Registrado em", value=data_registro,                     inline=False)
+            embed.add_field(name="📝 Descrição",     value=descricao or "Sem descrição definida", inline=False)
+            embed.add_field(name="📊 XP",            value=f"{xp} XP",                        inline=True)
+            embed.add_field(name="🔝 Nível",         value=f"{nivel}",                        inline=True)
+            embed.add_field(name="💰 Flingers",      value=f"{flingers}",                     inline=True)
             await interaction.response.send_message(embed=embed)
         else:
             await interaction.response.send_message(
@@ -134,23 +131,26 @@ class UserProfileCog(commands.Cog):
     @app_commands.describe(descricao="Sua nova descrição")
     async def editarperfil(self, interaction: discord.Interaction, descricao: str):
         conn = sqlite3.connect('usuarios.db')
-        c = conn.cursor()
-        c.execute("UPDATE usuarios SET descricao = ? WHERE id = ?", (descricao, interaction.user.id))
+        c    = conn.cursor()
+        c.execute(
+            "UPDATE usuarios SET descricao = ? WHERE id = ? AND guild_id = ?",
+            (descricao, interaction.user.id, interaction.guild_id)
+        )
         conn.commit()
         conn.close()
         await interaction.response.send_message("✅ Sua descrição foi atualizada com sucesso!", ephemeral=True)
 
     @app_commands.command(name="topnivel", description="Veja os usuários com mais nível e XP")
     async def topnivel(self, interaction: discord.Interaction):
-        conn = sqlite3.connect("usuarios.db")
-        c = conn.cursor()
-
+        conn = sqlite3.connect('usuarios.db')
+        c    = conn.cursor()
         c.execute("""
             SELECT nome, discriminator, nivel, xp
             FROM usuarios
+            WHERE guild_id = ?
             ORDER BY nivel DESC, xp DESC
             LIMIT 10
-        """)
+        """, (interaction.guild_id,))
         top = c.fetchall()
         conn.close()
 
@@ -158,18 +158,13 @@ class UserProfileCog(commands.Cog):
             await interaction.response.send_message("⚠️ Ninguém possui nível ainda!", ephemeral=True)
             return
 
-        embed = discord.Embed(
-            title="🏆 Top 10 Usuários por Nível",
-            color=discord.Color.purple()
-        )
-
+        embed = discord.Embed(title="🏆 Top 10 Usuários por Nível", color=discord.Color.purple())
         for i, (nome, discriminator, nivel, xp) in enumerate(top, start=1):
             embed.add_field(
                 name=f"#{i} - {nome}#{discriminator}",
                 value=f"🔝 Nível: {nivel} | 📊 XP: {xp}",
                 inline=False
             )
-
         await interaction.response.send_message(embed=embed)
 
 

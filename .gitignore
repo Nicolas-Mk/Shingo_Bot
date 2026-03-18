@@ -36,3 +36,5 @@ dist/database/__pycache__/filmes_manager.cpython-313.pyc
 dist/database/__pycache__/user_manager.cpython-313.pyc
 database/__init__.py
 usuarios.db
+cogs/__pycache__/config_cog.cpython-313.pyc
+dist/

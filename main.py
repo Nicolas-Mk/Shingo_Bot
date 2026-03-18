@@ -2,8 +2,9 @@ import os
 import discord
 from discord.ext import commands
 from dotenv import load_dotenv
-from database.db_manager import UserManager
+from migrations.runner import rodar_migrations
 
+from cogs.config_cog import ConfigCog
 from cogs.economy import EconomyCog
 from cogs.user_profile import UserProfileCog
 from cogs.games import GamesCog
@@ -21,13 +22,12 @@ intents.reactions = True
 intents.guilds = True
 intents.members = True
 
+
 class CustomBot(commands.Bot):
     async def setup_hook(self):
-        # Criar e atualizar banco de dados
-        UserManager.criar_tabela()
-        UserManager.atualizar_tabela()
+        rodar_migrations()
 
-        # Adicionar Cogs
+        await self.add_cog(ConfigCog(self))
         await self.add_cog(EconomyCog(self))
         await self.add_cog(UserProfileCog(self))
         await self.add_cog(GamesCog(self))
@@ -35,12 +35,16 @@ class CustomBot(commands.Bot):
         await self.add_cog(UtilityCog(self))
         await self.add_cog(MalTrackerCog(self))
 
-        await self.tree.sync()
+        synced = await self.tree.sync()
+        print(f"✅ {len(synced)} comandos sincronizados.")
+
 
 bot = CustomBot(command_prefix='!', intents=intents)
+
 
 @bot.event
 async def on_ready():
     print(f'🤖 Bot conectado como {bot.user}')
+
 
 bot.run(TOKEN)
