@@ -5,27 +5,35 @@ from discord.ui import View, Button
 from discord import Interaction
 from utils.baralho import criar_baralho
 
-def adicionar_flingers(usuario_id, quantidade):
+
+def adicionar_flingers(usuario_id: int, guild_id: int, quantidade: int):
     conn = sqlite3.connect('usuarios.db')
-    c = conn.cursor()
-    c.execute("SELECT flingers FROM usuarios WHERE id = ?", (usuario_id,))
+    c    = conn.cursor()
+    c.execute(
+        "SELECT flingers FROM usuarios WHERE id = ? AND guild_id = ?",
+        (usuario_id, guild_id)
+    )
     row = c.fetchone()
     if row:
-        flingers_atual = row[0] if row[0] is not None else 0
-        novo_flingers = flingers_atual + quantidade
-        c.execute("UPDATE usuarios SET flingers = ? WHERE id = ?", (novo_flingers, usuario_id))
+        novo_flingers = (row[0] or 0) + quantidade
+        c.execute(
+            "UPDATE usuarios SET flingers = ? WHERE id = ? AND guild_id = ?",
+            (novo_flingers, usuario_id, guild_id)
+        )
         conn.commit()
     conn.close()
 
+
 class BlackjackView(View):
-    def __init__(self, interaction: Interaction, aposta: int):
+    def __init__(self, interaction: Interaction, aposta: int, guild_id: int):
         super().__init__(timeout=60)
         self.interaction = interaction
-        self.aposta = aposta
-        self.baralho = criar_baralho()
+        self.aposta      = aposta
+        self.guild_id    = guild_id
+        self.baralho     = criar_baralho()
         self.player_hand = self.draw_hand()
         self.dealer_hand = self.draw_hand()
-        self.finished = False
+        self.finished    = False
 
     def draw_card(self):
         if not self.baralho:
@@ -37,40 +45,57 @@ class BlackjackView(View):
 
     def calcular_pontuacao(self, hand):
         total = 0
-        aces = 0
+        aces  = 0
         for carta in hand:
             valor = carta[:-1]
             if valor in ['J', 'Q', 'K']:
                 total += 10
             elif valor == 'A':
-                aces += 1
+                aces  += 1
                 total += 11
             else:
                 total += int(valor)
         while total > 21 and aces > 0:
             total -= 10
-            aces -= 1
+            aces  -= 1
         return total
 
     def dealer_jogar(self, pontuacao_jogador: int):
-        """
-        O dealer vê a pontuação do jogador e compra cartas
-        até superar essa pontuação ou estourar.
-        Isso garante vantagem ao dealer, pois ele sempre
-        tenta bater o jogador em vez de parar em 17 às cegas.
-        """
+        import random as _random
         while True:
             dealer_total = self.calcular_pontuacao(self.dealer_hand)
 
-            # Se já estourou, para
+            # Estourou — para
             if dealer_total > 21:
                 break
 
-            # Se já vence o jogador, para — não precisa arriscar mais
+            # Já vence o jogador — para
             if dealer_total > pontuacao_jogador:
                 break
 
-            # Se empatou ou está atrás, compra mais uma carta
+            # Empate
+            if dealer_total == pontuacao_jogador:
+                # Em 21 nunca arrisca — empate garantido
+                if dealer_total == 21:
+                    break
+                # Em 19 ou 20 tem 20% de chance de arriscar
+                elif dealer_total >= 19:
+                    if _random.random() < 0.20:
+                        self.dealer_hand.append(self.draw_card())
+                    else:
+                        break
+                # Em 17 ou 18 tem 50% de chance de arriscar
+                elif dealer_total >= 17:
+                    if _random.random() < 0.50:
+                        self.dealer_hand.append(self.draw_card())
+                    else:
+                        break
+                # Abaixo de 17 empatado — sempre compra
+                else:
+                    self.dealer_hand.append(self.draw_card())
+                continue
+
+            # Está atrás — sempre compra
             self.dealer_hand.append(self.draw_card())
 
     async def atualizar_mensagem(self, interaction):
@@ -78,7 +103,6 @@ class BlackjackView(View):
         dealer_total = self.calcular_pontuacao(self.dealer_hand)
 
         if self.finished:
-            resultado = ""
             ganho = 0
 
             if player_total > 21:
@@ -96,18 +120,20 @@ class BlackjackView(View):
                 ganho = self.aposta
 
             if ganho > 0:
-                adicionar_flingers(self.interaction.user.id, ganho)
+                adicionar_flingers(self.interaction.user.id, self.guild_id, ganho)
 
             embed = discord.Embed(title="🃏 Blackjack Finalizado")
             embed.add_field(name="Sua mão", value=f"{' | '.join(self.player_hand)}\n**Total: {player_total}**", inline=True)
-            embed.add_field(name="Dealer", value=f"{' | '.join(self.dealer_hand)}\n**Total: {dealer_total}**", inline=True)
+            embed.add_field(name="Dealer",  value=f"{' | '.join(self.dealer_hand)}\n**Total: {dealer_total}**", inline=True)
             embed.set_footer(text=resultado)
-            await interaction.response.edit_message(embed=embed, view=None)
+            await interaction.response.defer()
+            await interaction.message.edit(embed=embed, view=None)
         else:
             embed = discord.Embed(title="🃏 Blackjack")
             embed.add_field(name="Sua mão", value=f"{' | '.join(self.player_hand)}\n**Total: {player_total}**", inline=True)
-            embed.add_field(name="Dealer", value=f"{self.dealer_hand[0]} | ❓", inline=True)
-            await interaction.response.edit_message(embed=embed, view=self)
+            embed.add_field(name="Dealer",  value=f"{self.dealer_hand[0]} | ❓", inline=True)
+            await interaction.response.defer()
+            await interaction.message.edit(embed=embed, view=self)
 
     @discord.ui.button(label="Hit", style=discord.ButtonStyle.primary)
     async def hit(self, interaction: Interaction, button: Button):
@@ -118,7 +144,6 @@ class BlackjackView(View):
         self.player_hand.append(self.draw_card())
         if self.calcular_pontuacao(self.player_hand) > 21:
             self.finished = True
-            # Jogador estourou — dealer não precisa comprar, vitória automática
         await self.atualizar_mensagem(interaction)
 
     @discord.ui.button(label="Stand", style=discord.ButtonStyle.secondary)
