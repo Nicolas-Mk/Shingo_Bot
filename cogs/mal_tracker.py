@@ -18,7 +18,7 @@ from cogs.config_cog import get_config
 # ══════════════════════════════════════════════
 
 MAL_CLIENT_ID: str = os.getenv("MAL_CLIENT_ID", "")
-LIMITE_ITENS: int = 100
+LIMITE_ITENS: int = 50
 
 # ══════════════════════════════════════════════
 

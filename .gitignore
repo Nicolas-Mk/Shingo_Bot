@@ -38,3 +38,6 @@ database/__init__.py
 usuarios.db
 cogs/__pycache__/config_cog.cpython-313.pyc
 dist/
+cogs/__pycache__/loja.cpython-313.pyc
+migrations/__pycache__/V005__criar_tabelas_loja.cpython-313.pyc
+Shingo-Bot.zip

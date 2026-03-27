@@ -24,6 +24,16 @@ def adicionar_flingers(usuario_id: int, guild_id: int, quantidade: int):
     conn.close()
 
 
+def is_blackjack_natural(hand: list[str]) -> bool:
+    """Retorna True se a mão for um blackjack natural (Ás + carta de valor 10, com exatamente 2 cartas)."""
+    if len(hand) != 2:
+        return False
+    valores = [c[:-1] for c in hand]
+    tem_as      = "A" in valores
+    tem_dez     = any(v in {"10", "J", "Q", "K"} for v in valores)
+    return tem_as and tem_dez
+
+
 class BlackjackView(View):
     def __init__(self, interaction: Interaction, aposta: int, guild_id: int):
         super().__init__(timeout=60)
@@ -65,37 +75,28 @@ class BlackjackView(View):
         while True:
             dealer_total = self.calcular_pontuacao(self.dealer_hand)
 
-            # Estourou — para
             if dealer_total > 21:
                 break
-
-            # Já vence o jogador — para
             if dealer_total > pontuacao_jogador:
                 break
 
-            # Empate
             if dealer_total == pontuacao_jogador:
-                # Em 21 nunca arrisca — empate garantido
                 if dealer_total == 21:
                     break
-                # Em 19 ou 20 tem 20% de chance de arriscar
                 elif dealer_total >= 19:
                     if _random.random() < 0.20:
                         self.dealer_hand.append(self.draw_card())
                     else:
                         break
-                # Em 17 ou 18 tem 50% de chance de arriscar
                 elif dealer_total >= 17:
                     if _random.random() < 0.50:
                         self.dealer_hand.append(self.draw_card())
                     else:
                         break
-                # Abaixo de 17 empatado — sempre compra
                 else:
                     self.dealer_hand.append(self.draw_card())
                 continue
 
-            # Está atrás — sempre compra
             self.dealer_hand.append(self.draw_card())
 
     async def atualizar_mensagem(self, interaction):
@@ -105,33 +106,66 @@ class BlackjackView(View):
         if self.finished:
             ganho = 0
 
+            player_natural = is_blackjack_natural(self.player_hand)
+            dealer_natural = is_blackjack_natural(self.dealer_hand)
+
             if player_total > 21:
                 resultado = f"💥 Você estourou! Perdeu {self.aposta} flingers."
+
             elif dealer_total > 21:
-                resultado = f"🏆 O dealer estourou! Você ganhou {self.aposta * 2} flingers!"
-                ganho = self.aposta * 2
+                if player_natural:
+                    ganho     = int(self.aposta * 2.5)  # aposta + 1.5x
+                    resultado = f"🃏 Blackjack natural! O dealer estourou! Você ganhou {ganho} flingers!"
+                else:
+                    ganho     = self.aposta * 2
+                    resultado = f"🏆 O dealer estourou! Você ganhou {ganho} flingers!"
+
+            elif player_natural and not dealer_natural:
+                # Blackjack natural do jogador bate qualquer 21 não-natural do dealer
+                ganho     = int(self.aposta * 2.5)  # aposta + 1.5x
+                resultado = f"🃏 Blackjack natural! Você ganhou {ganho} flingers!"
+
+            elif dealer_natural and not player_natural:
+                # Dealer tem blackjack natural, jogador não
+                resultado = f"❌ Dealer tem blackjack natural! Você perdeu {self.aposta} flingers."
+
             elif player_total > dealer_total:
-                resultado = f"🏆 Você venceu! Ganhou {self.aposta * 2} flingers!"
-                ganho = self.aposta * 2
+                ganho     = self.aposta * 2
+                resultado = f"🏆 Você venceu! Ganhou {ganho} flingers!"
+
             elif player_total < dealer_total:
                 resultado = f"❌ Você perdeu {self.aposta} flingers."
+
             else:
+                # Empate real — ambos naturais ou ambos não-naturais com mesmo total
+                ganho     = self.aposta
                 resultado = f"🤝 Empate! Você recuperou {self.aposta} flingers."
-                ganho = self.aposta
 
             if ganho > 0:
                 adicionar_flingers(self.interaction.user.id, self.guild_id, ganho)
 
             embed = discord.Embed(title="🃏 Blackjack Finalizado")
-            embed.add_field(name="Sua mão", value=f"{' | '.join(self.player_hand)}\n**Total: {player_total}**", inline=True)
-            embed.add_field(name="Dealer",  value=f"{' | '.join(self.dealer_hand)}\n**Total: {dealer_total}**", inline=True)
+            embed.add_field(
+                name="Sua mão",
+                value=f"{' | '.join(self.player_hand)}\n**Total: {player_total}**{'  🃏' if player_natural else ''}",
+                inline=True
+            )
+            embed.add_field(
+                name="Dealer",
+                value=f"{' | '.join(self.dealer_hand)}\n**Total: {dealer_total}**{'  🃏' if dealer_natural else ''}",
+                inline=True
+            )
             embed.set_footer(text=resultado)
             await interaction.response.defer()
             await interaction.message.edit(embed=embed, view=None)
         else:
             embed = discord.Embed(title="🃏 Blackjack")
-            embed.add_field(name="Sua mão", value=f"{' | '.join(self.player_hand)}\n**Total: {player_total}**", inline=True)
-            embed.add_field(name="Dealer",  value=f"{self.dealer_hand[0]} | ❓", inline=True)
+            embed.add_field(
+                name="Sua mão",
+                value=f"{' | '.join(self.player_hand)}\n**Total: {player_total}**",
+                inline=True
+            )
+            embed.add_field(name="Dealer", value=f"{self.dealer_hand[0]} | ❓", inline=True)
             await interaction.response.defer()
             await interaction.message.edit(embed=embed, view=self)
 

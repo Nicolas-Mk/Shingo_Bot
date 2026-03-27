@@ -11,6 +11,7 @@ from cogs.games import GamesCog
 from cogs.voice_xp import VoiceXPCog
 from cogs.utility import UtilityCog
 from cogs.mal_tracker import MalTrackerCog
+from cogs.loja import LojaCog
 
 
 load_dotenv()
@@ -34,6 +35,7 @@ class CustomBot(commands.Bot):
         await self.add_cog(VoiceXPCog(self))
         await self.add_cog(UtilityCog(self))
         await self.add_cog(MalTrackerCog(self))
+        await self.add_cog(LojaCog(self))
 
         synced = await self.tree.sync()
         print(f"✅ {len(synced)} comandos sincronizados.")

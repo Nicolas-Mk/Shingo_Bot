@@ -9,7 +9,7 @@ import time
 class GamesCog(commands.Cog):
     def __init__(self, bot):
         self.bot = bot
-        self.ultimo_blackjack = {}  # (user_id, guild_id): timestamp
+        self.ultimo_blackjack = {}
 
     @app_commands.command(name="blackjack", description="Jogue blackjack contra o bot apostando flingers!")
     @app_commands.describe(valor="Quantidade de flingers para apostar")
@@ -18,7 +18,6 @@ class GamesCog(commands.Cog):
         guild_id = interaction.guild_id
         agora    = time.time()
 
-        # Cooldown isolado por servidor
         key    = (user_id, guild_id)
         ultimo = self.ultimo_blackjack.get(key)
         if ultimo and agora - ultimo < 300:
@@ -35,7 +34,6 @@ class GamesCog(commands.Cog):
             await interaction.response.send_message("❌ Aposta inválida. Escolha um valor maior que zero.", ephemeral=True)
             return
 
-        # Valida saldo antes de qualquer coisa
         conn = sqlite3.connect("usuarios.db")
         c    = conn.cursor()
         c.execute(
@@ -49,10 +47,8 @@ class GamesCog(commands.Cog):
             await interaction.response.send_message("❌ Você não tem flingers suficientes para essa aposta.", ephemeral=True)
             return
 
-        # Defer garante os 3 segundos — qualquer erro de rede aqui não debita nada ainda
         await interaction.response.defer()
 
-        # Só debita após o defer ter funcionado
         conn = sqlite3.connect("usuarios.db")
         c    = conn.cursor()
         c.execute(
@@ -78,7 +74,6 @@ class GamesCog(commands.Cog):
                 view=view,
             )
         except Exception as e:
-            # Se o envio falhar após o débito, devolve os flingers
             conn = sqlite3.connect("usuarios.db")
             c    = conn.cursor()
             c.execute(

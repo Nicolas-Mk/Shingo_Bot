@@ -26,6 +26,7 @@ X_LINK_REGEX      = re.compile(r"https?://(www\.)?(x\.com|twitter\.com)/\S+", re
 ASSET_IMAGE_PATH  = os.path.join("assets", "cuidado.png")
 PEOPLE_THRESHOLD  = 6        # notifica quando a call atinge esse número
 CHANNEL_COOLDOWN_MIN = 60    # cooldown por canal de voz (minutos)
+USUARIO_OBRIGATORIO = 275940282405617665  # deve estar na call para o aviso ser enviado
 
 
 class UtilityCog(commands.Cog):
@@ -72,6 +73,9 @@ class UtilityCog(commands.Cog):
             member_count = len(channel.members)
 
         if member_count >= PEOPLE_THRESHOLD and self._can_send_for_channel(channel.id):
+            usuario_presente = any(m.id == USUARIO_OBRIGATORIO for m in channel.members)
+            if not usuario_presente:
+                return
             text_ch = channel.guild.get_channel(canal_id)
 
             if isinstance(text_ch, discord.TextChannel):
