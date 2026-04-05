@@ -1,6 +1,7 @@
 import os
 import discord
 from discord.ext import commands
+from discord import app_commands
 from dotenv import load_dotenv
 from migrations.runner import rodar_migrations
 
@@ -12,6 +13,8 @@ from cogs.voice_xp import VoiceXPCog
 from cogs.utility import UtilityCog
 from cogs.mal_tracker import MalTrackerCog
 from cogs.loja import LojaCog
+from cogs.mal_lookup import MalLookupCog
+
 
 
 load_dotenv()
@@ -35,6 +38,7 @@ class CustomBot(commands.Bot):
         await self.add_cog(VoiceXPCog(self))
         await self.add_cog(UtilityCog(self))
         await self.add_cog(MalTrackerCog(self))
+        await self.add_cog(MalLookupCog(self))
         await self.add_cog(LojaCog(self))
 
         synced = await self.tree.sync()
@@ -42,6 +46,22 @@ class CustomBot(commands.Bot):
 
 
 bot = CustomBot(command_prefix='!', intents=intents)
+
+
+@bot.tree.error
+async def on_app_command_error(interaction: discord.Interaction, error: app_commands.AppCommandError):
+    if isinstance(error, app_commands.MissingPermissions):
+        await interaction.response.send_message(
+            "❌ Você não tem permissão para usar este comando.", ephemeral=True
+        )
+        print(f"[Permissão] {interaction.user} tentou usar /{interaction.command.name} sem permissão em '{interaction.guild.name}'.")
+    else:
+        # Outros erros continuam aparecendo no console normalmente
+        print(f"[Erro] Comando /{interaction.command.name} por {interaction.user}: {error}")
+        if not interaction.response.is_done():
+            await interaction.response.send_message(
+                "❌ Ocorreu um erro ao executar este comando.", ephemeral=True
+            )
 
 
 @bot.event

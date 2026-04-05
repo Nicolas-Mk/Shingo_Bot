@@ -22,8 +22,6 @@ LIMITE_ITENS: int = 50
 
 # ══════════════════════════════════════════════
 
-USUARIOS_FILE   = "mal_usuarios.json"  # usado apenas na migração inicial
-FILTROS_FILE    = "mal_filtros.json"   # usado apenas na migração inicial
 MAL_API_BASE    = "https://api.myanimelist.net/v2"
 BRASILIA        = timezone(timedelta(hours=-3))
 
@@ -68,66 +66,6 @@ ROTULOS_MANGA = {
 # ──────────────────────────────────────────────
 #  Persistência no banco (por servidor)
 # ──────────────────────────────────────────────
-
-def criar_tabelas_mal():
-    """Cria as tabelas do MAL Tracker se não existirem."""
-    conn = sqlite3.connect("usuarios.db")
-    c = conn.cursor()
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS mal_usuarios (
-            guild_id INTEGER NOT NULL,
-            username TEXT    NOT NULL,
-            PRIMARY KEY (guild_id, username)
-        )
-    """)
-    c.execute("""
-        CREATE TABLE IF NOT EXISTS mal_filtros (
-            guild_id INTEGER NOT NULL,
-            tipo     TEXT    NOT NULL,
-            status   TEXT    NOT NULL,
-            PRIMARY KEY (guild_id, tipo, status)
-        )
-    """)
-    conn.commit()
-    conn.close()
-
-
-def migrar_json_para_banco():
-    """
-    Migração única: importa mal_usuarios.json e mal_filtros.json
-    para o banco usando guild_id = 0 como placeholder.
-    Apaga os arquivos após a migração bem-sucedida.
-    """
-    conn = sqlite3.connect("usuarios.db")
-    c = conn.cursor()
-
-    if os.path.exists(USUARIOS_FILE):
-        with open(USUARIOS_FILE, "r") as f:
-            usuarios = json.load(f)
-        for u in usuarios:
-            c.execute(
-                "INSERT OR IGNORE INTO mal_usuarios (guild_id, username) VALUES (?, ?)",
-                (0, u)
-            )
-        conn.commit()
-        os.rename(USUARIOS_FILE, USUARIOS_FILE + ".migrado")
-        print(f"[MAL Tracker] {len(usuarios)} usuário(s) migrados do JSON para o banco (guild_id=0).")
-
-    if os.path.exists(FILTROS_FILE):
-        with open(FILTROS_FILE, "r") as f:
-            filtros = json.load(f)
-        for tipo, statuses in filtros.items():
-            for status in statuses:
-                c.execute(
-                    "INSERT OR IGNORE INTO mal_filtros (guild_id, tipo, status) VALUES (?, ?, ?)",
-                    (0, tipo, status)
-                )
-        conn.commit()
-        os.rename(FILTROS_FILE, FILTROS_FILE + ".migrado")
-        print("[MAL Tracker] Filtros migrados do JSON para o banco (guild_id=0).")
-
-    conn.close()
-
 
 def carregar_usuarios(guild_id: int) -> list[str]:
     conn = sqlite3.connect("usuarios.db")
@@ -287,7 +225,7 @@ class MalTrackerCog(commands.Cog):
         url = f"{MAL_API_BASE}/users/{username}/animelist"
         params = {"fields": "list_status", "sort": "list_updated_at", "limit": LIMITE_ITENS}
         try:
-            async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+            async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=30)) as resp:
                 if resp.status == 200:
                     return (await resp.json()).get("data", [])
                 elif resp.status == 403:
@@ -305,7 +243,7 @@ class MalTrackerCog(commands.Cog):
         url = f"{MAL_API_BASE}/users/{username}/mangalist"
         params = {"fields": "list_status", "sort": "list_updated_at", "limit": LIMITE_ITENS}
         try:
-            async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+            async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=30)) as resp:
                 if resp.status == 200:
                     return (await resp.json()).get("data", [])
                 elif resp.status == 403:
@@ -392,21 +330,38 @@ class MalTrackerCog(commands.Cog):
                 continue
 
             if snap_anterior != snap_atual:
+                ant = json.loads(snap_anterior)
+                atu = json.loads(snap_atual)
+
+                # Verifica se apenas a nota mudou (status e progresso iguais)
+                campos_progresso = [
+                    "status", "num_episodes_watched", "is_rewatching",
+                    "num_chapters_read", "num_volumes_read", "is_rereading"
+                ]
+                so_nota = (
+                    ant.get("score") != atu.get("score") and
+                    all(ant.get(k) == atu.get(k) for k in campos_progresso if k in ant or k in atu)
+                )
+
                 estado[item_id] = snap_atual
-                # Só reporta se o status atual está na lista de permitidos
-                if status_val in status_permitidos:
-                    novas.append(self._montar_entrada(titulo, item_id, status, updated_at, tipo))
+
+                # Mudança só de nota sempre reporta, independente do filtro de status
+                if so_nota or status_val in status_permitidos:
+                    nota_anterior = ant.get("score") if so_nota else None
+                    novas.append(self._montar_entrada(titulo, item_id, status, updated_at, tipo, so_nota=so_nota, nota_anterior=nota_anterior))
 
         return novas
 
-    def _montar_entrada(self, titulo: str, item_id: str, status: dict, updated_at: str, tipo: str) -> dict:
+    def _montar_entrada(self, titulo: str, item_id: str, status: dict, updated_at: str, tipo: str, so_nota: bool = False, nota_anterior: int | None = None) -> dict:
         entrada = {
-            "titulo":     titulo,
-            "item_id":    item_id,
-            "status":     status.get("status", ""),
-            "score":      status.get("score", 0),
-            "updated_at": updated_at,
-            "tipo":       tipo,
+            "titulo":        titulo,
+            "item_id":       item_id,
+            "status":        status.get("status", ""),
+            "score":         status.get("score", 0),
+            "updated_at":    updated_at,
+            "tipo":          tipo,
+            "so_nota":       so_nota,
+            "nota_anterior": nota_anterior,
         }
         if tipo == "anime":
             entrada["episodios"]  = status.get("num_episodes_watched", 0)
@@ -419,8 +374,13 @@ class MalTrackerCog(commands.Cog):
 
     async def _coletar_mudancas(self, guild_id: int) -> dict[str, dict[str, list[dict]]]:
         resultado: dict[str, dict[str, list[dict]]] = {}
+        usuarios = carregar_usuarios(guild_id)
 
-        for usuario in carregar_usuarios(guild_id):
+        if not usuarios:
+            print(f"[MAL Tracker] Guild {guild_id}: nenhum usuário monitorado.")
+            return resultado
+
+        for usuario in usuarios:
             estado_anime = self._estado_anime.setdefault((guild_id, usuario), {})
             estado_manga = self._estado_manga.setdefault((guild_id, usuario), {})
 
@@ -432,6 +392,8 @@ class MalTrackerCog(commands.Cog):
 
             novas_anime.sort(key=lambda x: x["updated_at"])
             novas_manga.sort(key=lambda x: x["updated_at"])
+
+            print(f"[MAL Tracker] {usuario} (guild {guild_id}): {len(novas_anime)} anime, {len(novas_manga)} mangá novos.")
 
             if novas_anime or novas_manga:
                 resultado[usuario] = {"anime": novas_anime, "manga": novas_manga}
@@ -445,18 +407,28 @@ class MalTrackerCog(commands.Cog):
     def _formatar_linhas_anime(self, itens: list[dict]) -> list[str]:
         linhas = []
         for item in itens:
-            emoji, label = STATUS_ANIME.get(item["status"], ("📝", item["status"]))
-            url   = f"https://myanimelist.net/anime/{item['item_id']}"
-            linha = f"{emoji} **[{item['titulo']}]({url})**"
-            detalhes: list[str] = [label]
+            url = f"https://myanimelist.net/anime/{item['item_id']}"
 
-            if item["status"] == "watching" or item.get("rewatching"):
-                ep = item.get("episodios", 0)
-                detalhes.append(f"Reassistindo • EP {ep}" if item.get("rewatching") else f"EP {ep}")
+            if item.get("so_nota"):
+                linha    = f"📝 **[{item['titulo']}]({url})**"
+                nota_ant = item.get("nota_anterior")
+                estrelas = "⭐" * min(item["score"] // 2, 5) if item["score"] > 0 else ""
+                if nota_ant is not None:
+                    detalhes = [f"Atualizou nota: **{nota_ant}/10 → {item['score']}/10** {estrelas}".strip()]
+                else:
+                    detalhes = [f"Atualizou nota: **{item['score']}/10** {estrelas}".strip()]
+            else:
+                emoji, label = STATUS_ANIME.get(item["status"], ("📝", item["status"]))
+                linha    = f"{emoji} **[{item['titulo']}]({url})**"
+                detalhes: list[str] = [label]
 
-            if item["status"] == "completed" and item["score"] > 0:
-                estrelas = "⭐" * min(item["score"] // 2, 5)
-                detalhes.append(f"Nota: **{item['score']}/10** {estrelas}")
+                if item["status"] == "watching" or item.get("rewatching"):
+                    ep = item.get("episodios", 0)
+                    detalhes.append(f"Reassistindo • EP {ep}" if item.get("rewatching") else f"EP {ep}")
+
+                if item["score"] > 0:
+                    estrelas = "⭐" * min(item["score"] // 2, 5)
+                    detalhes.append(f"Nota: **{item['score']}/10** {estrelas}")
 
             if item["updated_at"]:
                 try:
@@ -472,18 +444,28 @@ class MalTrackerCog(commands.Cog):
     def _formatar_linhas_manga(self, itens: list[dict]) -> list[str]:
         linhas = []
         for item in itens:
-            emoji, label = STATUS_MANGA.get(item["status"], ("📝", item["status"]))
-            url   = f"https://myanimelist.net/manga/{item['item_id']}"
-            linha = f"{emoji} **[{item['titulo']}]({url})**"
-            detalhes: list[str] = [label]
+            url = f"https://myanimelist.net/manga/{item['item_id']}"
 
-            if item["status"] == "reading" or item.get("rereading"):
-                cap = item.get("capitulos", 0)
-                detalhes.append(f"Relendo • Cap {cap}" if item.get("rereading") else f"Cap {cap}")
+            if item.get("so_nota"):
+                linha    = f"📝 **[{item['titulo']}]({url})**"
+                nota_ant = item.get("nota_anterior")
+                estrelas = "⭐" * min(item["score"] // 2, 5) if item["score"] > 0 else ""
+                if nota_ant is not None:
+                    detalhes = [f"Atualizou nota: **{nota_ant}/10 → {item['score']}/10** {estrelas}".strip()]
+                else:
+                    detalhes = [f"Atualizou nota: **{item['score']}/10** {estrelas}".strip()]
+            else:
+                emoji, label = STATUS_MANGA.get(item["status"], ("📝", item["status"]))
+                linha    = f"{emoji} **[{item['titulo']}]({url})**"
+                detalhes: list[str] = [label]
 
-            if item["status"] == "completed" and item["score"] > 0:
-                estrelas = "⭐" * min(item["score"] // 2, 5)
-                detalhes.append(f"Nota: **{item['score']}/10** {estrelas}")
+                if item["status"] == "reading" or item.get("rereading"):
+                    cap = item.get("capitulos", 0)
+                    detalhes.append(f"Relendo • Cap {cap}" if item.get("rereading") else f"Cap {cap}")
+
+                if item["score"] > 0:
+                    estrelas = "⭐" * min(item["score"] // 2, 5)
+                    detalhes.append(f"Nota: **{item['score']}/10** {estrelas}")
 
             if item["updated_at"]:
                 try:
@@ -500,6 +482,9 @@ class MalTrackerCog(commands.Cog):
         self, mudancas: dict[str, dict[str, list[dict]]]
     ) -> list[tuple[discord.Embed, discord.File | None]]:
         resultado: list[tuple[discord.Embed, discord.File | None]] = []
+
+        if not mudancas:
+            return resultado
 
         agora = datetime.now(BRASILIA).strftime("%d/%m/%Y %H:%M")
         header = discord.Embed(
@@ -555,6 +540,9 @@ class MalTrackerCog(commands.Cog):
 
     async def _enviar_relatorio(self, canal: discord.TextChannel, mudancas: dict) -> int:
         pares = await self._formatar_relatorio(mudancas)
+        if not pares:
+            print(f"[MAL Tracker] _enviar_relatorio: nenhum embed gerado, abortando envio.")
+            return 0
 
         lote_embeds: list[discord.Embed] = []
         lote_files: list[discord.File]   = []
@@ -589,31 +577,37 @@ class MalTrackerCog(commands.Cog):
         await self.bot.wait_until_ready()
         print(f"[MAL Tracker] Verificando atualizações... ({datetime.now().strftime('%H:%M:%S')})")
 
-        for guild in self.bot.guilds:
-            canal_id = get_config(guild.id, "canal_mal")
-            if not canal_id:
-                continue
+        async def processar_guild(guild):
+            try:
+                canal_id = get_config(guild.id, "canal_mal")
+                if not canal_id:
+                    print(f"[MAL Tracker] Guild '{guild.name}': canal_mal não configurado, pulando.")
+                    return
 
-            mudancas = await self._coletar_mudancas(guild.id)
-            if not mudancas:
-                continue
+                mudancas = await self._coletar_mudancas(guild.id)
+                if not mudancas:
+                    print(f"[MAL Tracker] Guild '{guild.name}': nenhuma atualização encontrada.")
+                    return
 
-            canal = self.bot.get_channel(canal_id)
-            if canal is None:
-                print(f"[MAL Tracker] ⚠️  Canal {canal_id} não encontrado na guild {guild.name}.")
-                continue
+                canal = self.bot.get_channel(canal_id)
+                if canal is None:
+                    print(f"[MAL Tracker] ⚠️  Canal {canal_id} não encontrado na guild {guild.name}.")
+                    return
 
-            await self._enviar_relatorio(canal, mudancas)
-            total_anime = sum(len(v["anime"]) for v in mudancas.values())
-            total_manga = sum(len(v["manga"]) for v in mudancas.values())
-            print(f"[MAL Tracker] ✅ Relatório enviado ({guild.name}): {total_anime} anime, {total_manga} mangá — {len(mudancas)} usuário(s).")
+                await self._enviar_relatorio(canal, mudancas)
+                total_anime = sum(len(v["anime"]) for v in mudancas.values())
+                total_manga = sum(len(v["manga"]) for v in mudancas.values())
+                print(f"[MAL Tracker] ✅ Relatório enviado ({guild.name}): {total_anime} anime, {total_manga} mangá — {len(mudancas)} usuário(s).")
+            except Exception as e:
+                print(f"[MAL Tracker] ❌ Erro ao processar guild '{guild.name}': {e}")
+
+        await asyncio.gather(*[processar_guild(guild) for guild in self.bot.guilds])
 
     @monitorar_loop.before_loop
     async def antes_do_loop(self):
         await self.bot.wait_until_ready()
         print("[MAL Tracker] Carregando estado inicial...")
-        for guild in self.bot.guilds:
-            await self._coletar_mudancas(guild.id)
+        await asyncio.gather(*[self._coletar_mudancas(guild.id) for guild in self.bot.guilds])
         print("[MAL Tracker] Estado inicial carregado. Primeiro relatório em 1 hora.")
 
     # ──────────────────────────────────────────

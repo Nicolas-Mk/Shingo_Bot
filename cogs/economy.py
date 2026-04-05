@@ -1,4 +1,5 @@
 import random
+import asyncio
 import discord
 from discord.ext import commands, tasks
 from discord import app_commands
@@ -57,10 +58,10 @@ class EconomyCog(commands.Cog):
             return texto
 
         tipos = [
-            {"nivel": "fácil",      "chance": 0.50, "tamanho": 5,  "recompensa": 3,  "caracteres": base},
-            {"nivel": "médio",      "chance": 0.40, "tamanho": 12, "recompensa": 5,  "caracteres": base},
-            {"nivel": "difícil",    "chance": 0.09, "tamanho": 25, "recompensa": 10, "caracteres": base},
-            {"nivel": "impossível", "chance": 0.01, "tamanho": 25, "recompensa": 50, "caracteres": "custom_acentuado"},
+            {"nivel": "fácil",      "chance": 0.50, "tamanho": 5,  "recompensa": 8,   "caracteres": base},
+            {"nivel": "médio",      "chance": 0.30, "tamanho": 12, "recompensa": 10,  "caracteres": base},
+            {"nivel": "difícil",    "chance": 0.15, "tamanho": 25, "recompensa": 25,  "caracteres": base},
+            {"nivel": "impossível", "chance": 0.05, "tamanho": 25, "recompensa": 100, "caracteres": "custom_acentuado"},
         ]
 
         escolha = random.choices(tipos, weights=[t["chance"] for t in tipos])[0]
@@ -75,9 +76,10 @@ class EconomyCog(commands.Cog):
     #  Loops
     # ──────────────────────────────────────────
 
-    @tasks.loop(minutes=30)
+    @tasks.loop(seconds=1)
     async def contador_economia_loop(self):
         await self.bot.wait_until_ready()
+        await asyncio.sleep(random.randint(20 * 60, 30 * 60))
 
         for guild in self.bot.guilds:
             estado   = self._estado(guild.id)
@@ -204,7 +206,7 @@ class EconomyCog(commands.Cog):
             )
         await interaction.response.send_message(embed=embed)
 
-    @app_commands.command(name="trabalhar", description="Trabalhe e ganhe de 1 a 5 flingers (10min de cooldown)")
+    @app_commands.command(name="trabalhar", description="Trabalhe e ganhe flingers (10min de cooldown)")
     async def trabalhar(self, interaction: discord.Interaction):
         user_id  = interaction.user.id
         guild_id = interaction.guild_id
@@ -219,7 +221,18 @@ class EconomyCog(commands.Cog):
                 f"⏳ Você está cansado! Tente novamente em {minutos}m{segundos}s.", ephemeral=True
             )
 
-        ganho = random.randint(1, 5)
+        conn = sqlite3.connect("usuarios.db")
+        c    = conn.cursor()
+        c.execute("SELECT nivel FROM usuarios WHERE id = ? AND guild_id = ?", (user_id, guild_id))
+        row = c.fetchone()
+        conn.close()
+        nivel = row[0] if row else 1
+
+        faixa  = (nivel - 1) // 5
+        minimo = 1 + faixa * 3
+        maximo = 5 + faixa * 3
+
+        ganho = random.randint(minimo, maximo)
         UserManager.adicionar_flingers(user_id, guild_id, ganho)
         self.ultimo_trabalho[(user_id, guild_id)] = agora
 
@@ -241,7 +254,7 @@ class EconomyCog(commands.Cog):
         if estado["ativo"]:
             await interaction.response.send_message(
                 "✅ **Gerador de texto aleatório habilitado!**\n"
-                "Um novo desafio será postado a cada 30 minutos.", ephemeral=True
+                "Um novo desafio será postado a cada 20–30 minutos.", ephemeral=True
             )
         else:
             await interaction.response.send_message(
@@ -260,7 +273,7 @@ class EconomyCog(commands.Cog):
             color=discord.Color.green() if estado["ativo"] else discord.Color.red()
         )
         embed.add_field(name="Status",    value=status,              inline=True)
-        embed.add_field(name="Intervalo", value="A cada 30 minutos", inline=True)
+        embed.add_field(name="Intervalo", value="A cada 20–30 minutos", inline=True)
 
         if estado["can_win"] and estado["posted_at"]:
             restante = 300 - int((agora - estado["posted_at"]).total_seconds())
@@ -274,7 +287,7 @@ class EconomyCog(commands.Cog):
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
-    @app_commands.command(name="dar_flingers", description="[Admin] Adiciona flingers a um usuário.")
+    @app_commands.command(name="admin_add_flingers", description="[Admin] Adiciona flingers a um usuário.")
     @app_commands.describe(usuario="Usuário que receberá os flingers", quantidade="Quantidade a adicionar")
     @app_commands.checks.has_permissions(administrator=True)
     async def admin_add_flingers(self, interaction: discord.Interaction, usuario: discord.Member, quantidade: int):
@@ -306,7 +319,7 @@ class EconomyCog(commands.Cog):
         await interaction.response.send_message(embed=embed, ephemeral=True)
         print(f"[Economy] Admin {interaction.user} adicionou {quantidade} flingers para {usuario} na guild {interaction.guild_id}.")
 
-    @app_commands.command(name="tirar_flingers", description="[Admin] Remove flingers de um usuário.")
+    @app_commands.command(name="admin_remove_flingers", description="[Admin] Remove flingers de um usuário.")
     @app_commands.describe(usuario="Usuário que perderá os flingers", quantidade="Quantidade a remover")
     @app_commands.checks.has_permissions(administrator=True)
     async def admin_remove_flingers(self, interaction: discord.Interaction, usuario: discord.Member, quantidade: int):

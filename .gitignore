@@ -41,3 +41,5 @@ dist/
 cogs/__pycache__/loja.cpython-313.pyc
 migrations/__pycache__/V005__criar_tabelas_loja.cpython-313.pyc
 Shingo-Bot.zip
+texto_impossivel.png
+cogs/__pycache__/mal_lookup.cpython-313.pyc
