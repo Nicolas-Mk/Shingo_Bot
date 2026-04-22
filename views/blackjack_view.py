@@ -70,33 +70,32 @@ class BlackjackView(View):
             aces  -= 1
         return total
 
-    def dealer_jogar(self, pontuacao_jogador: int):
+    def dealer_deve_comprar(self, pontuacao_jogador: int) -> bool:
+        """Retorna True se o dealer deve comprar mais uma carta, seguindo as regras da casa."""
         import random as _random
-        while True:
-            dealer_total = self.calcular_pontuacao(self.dealer_hand)
+        dealer_total = self.calcular_pontuacao(self.dealer_hand)
 
-            if dealer_total > 21:
-                break
-            if dealer_total > pontuacao_jogador:
-                break
+        if dealer_total > 21:
+            return False
+        if dealer_total > pontuacao_jogador:
+            return False
 
-            if dealer_total == pontuacao_jogador:
-                if dealer_total == 21:
-                    break
-                elif dealer_total >= 19:
-                    if _random.random() < 0.20:
-                        self.dealer_hand.append(self.draw_card())
-                    else:
-                        break
-                elif dealer_total >= 17:
-                    if _random.random() < 0.50:
-                        self.dealer_hand.append(self.draw_card())
-                    else:
-                        break
-                else:
-                    self.dealer_hand.append(self.draw_card())
-                continue
+        if dealer_total == pontuacao_jogador:
+            if dealer_total == 21:
+                return False
+            elif dealer_total >= 19:
+                return _random.random() < 0.20
+            elif dealer_total >= 17:
+                return _random.random() < 0.50
+            else:
+                return True
 
+        # dealer_total < pontuacao_jogador — sempre compra
+        return True
+
+    def dealer_jogar(self, pontuacao_jogador: int):
+        """Faz o dealer jogar até o fim (usado no stand e no bust do jogador)."""
+        while self.dealer_deve_comprar(pontuacao_jogador):
             self.dealer_hand.append(self.draw_card())
 
     async def atualizar_mensagem(self, interaction):
@@ -165,7 +164,11 @@ class BlackjackView(View):
                 value=f"{' | '.join(self.player_hand)}\n**Total: {player_total}**",
                 inline=True
             )
-            embed.add_field(name="Dealer", value=f"{self.dealer_hand[0]} | ❓", inline=True)
+            embed.add_field(
+                name="Dealer",
+                value=f"{self.dealer_hand[0]} | ❓\n*({len(self.dealer_hand)} cartas)*",
+                inline=True
+            )
             await interaction.response.defer()
             await interaction.message.edit(embed=embed, view=self)
 
@@ -176,8 +179,16 @@ class BlackjackView(View):
             return
 
         self.player_hand.append(self.draw_card())
-        if self.calcular_pontuacao(self.player_hand) > 21:
+        player_total = self.calcular_pontuacao(self.player_hand)
+
+        if player_total > 21:
+            # Jogador estourou — dealer já ganhou, não compra mais nada
             self.finished = True
+        else:
+            # Dealer acompanha: compra uma carta se as regras mandarem
+            if self.dealer_deve_comprar(player_total):
+                self.dealer_hand.append(self.draw_card())
+
         await self.atualizar_mensagem(interaction)
 
     @discord.ui.button(label="Stand", style=discord.ButtonStyle.secondary)

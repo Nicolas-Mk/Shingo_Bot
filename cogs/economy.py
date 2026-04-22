@@ -28,11 +28,12 @@ class EconomyCog(commands.Cog):
         self.bot            = bot
         self.guilds_estado: dict[int, dict] = {}  # guild_id -> estado
         self.ultimo_trabalho = {}
-        self.contador_economia_loop.start()
+        self._loop_task: asyncio.Task | None = None
         self.verificar_expiracao_loop.start()
 
     def cog_unload(self):
-        self.contador_economia_loop.cancel()
+        if self._loop_task and not self._loop_task.done():
+            self._loop_task.cancel()
         self.verificar_expiracao_loop.cancel()
 
     def _estado(self, guild_id: int) -> dict:
@@ -76,45 +77,52 @@ class EconomyCog(commands.Cog):
     #  Loops
     # ──────────────────────────────────────────
 
-    @tasks.loop(seconds=1)
     async def contador_economia_loop(self):
+        """Loop principal do gerador — intervalo aleatório de 20-30 min entre cada rodada."""
         await self.bot.wait_until_ready()
-        await asyncio.sleep(random.randint(20 * 60, 30 * 60))
+        while True:
+            await asyncio.sleep(random.randint(20 * 60, 30 * 60))
 
-        for guild in self.bot.guilds:
-            estado   = self._estado(guild.id)
-            canal_id = get_config(guild.id, "canal_economia")
+            for guild in self.bot.guilds:
+                estado   = self._estado(guild.id)
+                canal_id = get_config(guild.id, "canal_economia")
 
-            if not canal_id or not estado["ativo"]:
-                continue
+                if not canal_id or not estado["ativo"]:
+                    continue
 
-            agora = datetime.now(timezone.utc)
+                agora = datetime.now(timezone.utc)
 
-            # Respeita cooldown de 1h se o último desafio expirou sem resposta
-            if estado["cooldown_ate"] and agora < estado["cooldown_ate"]:
-                continue
+                # Respeita cooldown de 1h se o último desafio expirou sem resposta
+                if estado["cooldown_ate"] and agora < estado["cooldown_ate"]:
+                    continue
 
-            # Não posta se já há desafio ativo nesta guild
-            if estado["can_win"]:
-                continue
+                # Não posta se já há desafio ativo nesta guild
+                if estado["can_win"]:
+                    continue
 
-            channel = self.bot.get_channel(canal_id)
-            if not channel:
-                continue
+                channel = self.bot.get_channel(canal_id)
+                if not channel:
+                    continue
 
-            texto, recompensa, nivel = self.gerar_texto_aleatorio()
-            estado["texto"]       = texto
-            estado["reward"]      = recompensa
-            estado["can_win"]     = True
-            estado["posted_at"]   = agora
-            estado["cooldown_ate"] = None
+                texto, recompensa, nivel = self.gerar_texto_aleatorio()
+                estado["texto"]       = texto
+                estado["reward"]      = recompensa
+                estado["can_win"]     = True
+                estado["posted_at"]   = agora
+                estado["cooldown_ate"] = None
 
-            file_image = criar_imagem_texto(texto)
-            await channel.send(
-                f"**Desafio de digitação!** (Nível: {nivel})\n"
-                f"Digite exatamente o texto para ganhar {recompensa} flingers! Você tem **5 minutos**.\n",
-                file=file_image
-            )
+                file_image = criar_imagem_texto(texto)
+                await channel.send(
+                    f"**Desafio de digitação!** (Nível: {nivel})\n"
+                    f"Digite exatamente o texto para ganhar {recompensa} flingers! Você tem **5 minutos**.\n",
+                    file=file_image
+                )
+
+    @commands.Cog.listener()
+    async def on_ready(self):
+        """Inicia o loop do gerador após o bot estar pronto."""
+        if self._loop_task is None or self._loop_task.done():
+            self._loop_task = asyncio.ensure_future(self.contador_economia_loop())
 
     @tasks.loop(seconds=30)
     async def verificar_expiracao_loop(self):
@@ -181,17 +189,16 @@ class EconomyCog(commands.Cog):
 
     @app_commands.command(name="topflingers", description="Veja os usuários com mais flingers")
     async def top_flingers(self, interaction: discord.Interaction):
-        conn = sqlite3.connect("usuarios.db")
-        c    = conn.cursor()
-        c.execute("""
+        with sqlite3.connect("usuarios.db") as conn:
+            c = conn.cursor()
+            c.execute("""
             SELECT nome, discriminator, flingers
             FROM usuarios
             WHERE guild_id = ?
             ORDER BY flingers DESC
             LIMIT 10
-        """, (interaction.guild_id,))
-        top = c.fetchall()
-        conn.close()
+            """, (interaction.guild_id,))
+            top = c.fetchall()
 
         if not top:
             await interaction.response.send_message("⚠️ Ninguém possui flingers ainda!", ephemeral=True)
@@ -221,11 +228,10 @@ class EconomyCog(commands.Cog):
                 f"⏳ Você está cansado! Tente novamente em {minutos}m{segundos}s.", ephemeral=True
             )
 
-        conn = sqlite3.connect("usuarios.db")
-        c    = conn.cursor()
-        c.execute("SELECT nivel FROM usuarios WHERE id = ? AND guild_id = ?", (user_id, guild_id))
-        row = c.fetchone()
-        conn.close()
+        with sqlite3.connect("usuarios.db") as conn:
+            c = conn.cursor()
+            c.execute("SELECT nivel FROM usuarios WHERE id = ? AND guild_id = ?", (user_id, guild_id))
+            row = c.fetchone()
         nivel = row[0] if row else 1
 
         faixa  = (nivel - 1) // 5
@@ -295,22 +301,20 @@ class EconomyCog(commands.Cog):
             await interaction.response.send_message("❌ A quantidade deve ser maior que zero.", ephemeral=True)
             return
 
-        conn = sqlite3.connect("usuarios.db")
-        c    = conn.cursor()
-        c.execute("SELECT flingers FROM usuarios WHERE id = ? AND guild_id = ?", (usuario.id, interaction.guild_id))
-        row = c.fetchone()
-        if not row:
-            conn.close()
-            await interaction.response.send_message(f"❌ {usuario.mention} não está registrado neste servidor.", ephemeral=True)
-            return
+        with sqlite3.connect("usuarios.db") as conn:
+            c = conn.cursor()
+            c.execute("SELECT flingers FROM usuarios WHERE id = ? AND guild_id = ?", (usuario.id, interaction.guild_id))
+            row = c.fetchone()
+            if not row:
+                await interaction.response.send_message(f"❌ {usuario.mention} não está registrado neste servidor.", ephemeral=True)
+                return
 
-        c.execute(
+            c.execute(
             "UPDATE usuarios SET flingers = flingers + ? WHERE id = ? AND guild_id = ?",
             (quantidade, usuario.id, interaction.guild_id)
-        )
-        conn.commit()
-        novo_saldo = row[0] + quantidade
-        conn.close()
+            )
+            conn.commit()
+            novo_saldo = row[0] + quantidade
 
         embed = discord.Embed(title="💰 Flingers adicionados", color=discord.Color.green())
         embed.add_field(name="Usuário",        value=usuario.mention,   inline=True)
@@ -327,22 +331,20 @@ class EconomyCog(commands.Cog):
             await interaction.response.send_message("❌ A quantidade deve ser maior que zero.", ephemeral=True)
             return
 
-        conn = sqlite3.connect("usuarios.db")
-        c    = conn.cursor()
-        c.execute("SELECT flingers FROM usuarios WHERE id = ? AND guild_id = ?", (usuario.id, interaction.guild_id))
-        row = c.fetchone()
-        if not row:
-            conn.close()
-            await interaction.response.send_message(f"❌ {usuario.mention} não está registrado neste servidor.", ephemeral=True)
-            return
+        with sqlite3.connect("usuarios.db") as conn:
+            c = conn.cursor()
+            c.execute("SELECT flingers FROM usuarios WHERE id = ? AND guild_id = ?", (usuario.id, interaction.guild_id))
+            row = c.fetchone()
+            if not row:
+                await interaction.response.send_message(f"❌ {usuario.mention} não está registrado neste servidor.", ephemeral=True)
+                return
 
-        novo_saldo = max(0, row[0] - quantidade)
-        c.execute(
+            novo_saldo = max(0, row[0] - quantidade)
+            c.execute(
             "UPDATE usuarios SET flingers = ? WHERE id = ? AND guild_id = ?",
             (novo_saldo, usuario.id, interaction.guild_id)
-        )
-        conn.commit()
-        conn.close()
+            )
+            conn.commit()
 
         removido = row[0] - novo_saldo
         embed = discord.Embed(title="💸 Flingers removidos", color=discord.Color.red())

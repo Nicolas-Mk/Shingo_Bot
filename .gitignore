@@ -43,3 +43,10 @@ migrations/__pycache__/V005__criar_tabelas_loja.cpython-313.pyc
 Shingo-Bot.zip
 texto_impossivel.png
 cogs/__pycache__/mal_lookup.cpython-313.pyc
+usuarios.db-shm
+usuarios.db-wal
+migrations/__pycache__/V006__adicionar_icon_mal_usuarios.cpython-313.pyc
+migrations/__pycache__/V007__criar_tabela_mal_avatares.cpython-313.pyc
+migrations/__pycache__/V008__remover_icon_mal_usuarios.cpython-313.pyc
+migrations/__pycache__/V009__criar_tabela_snapshots.cpython-313.pyc
+migrations/__pycache__/V010__corrigir_pk_mal_snapshots.cpython-313.pyc

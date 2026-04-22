@@ -289,22 +289,20 @@ class UtilityCog(commands.Cog):
         guild_id     = interaction.guild_id
         CUSTO_ANONIMO = 25
 
-        conn = sqlite3.connect("usuarios.db")
-        c    = conn.cursor()
-        c.execute("SELECT flingers FROM usuarios WHERE id = ? AND guild_id = ?", (autor.id, guild_id))
-        row = c.fetchone()
+        with sqlite3.connect("usuarios.db") as conn:
+            c = conn.cursor()
+            c.execute("SELECT flingers FROM usuarios WHERE id = ? AND guild_id = ?", (autor.id, guild_id))
+            row = c.fetchone()
 
-        if not row or row[0] is None or row[0] < CUSTO_ANONIMO:
-            conn.close()
-            await interaction.followup.send(
-                f"❌ Você não tem flingers suficientes! O custo é **{CUSTO_ANONIMO} flingers**.", ephemeral=True
-            )
-            return
+            if not row or row[0] is None or row[0] < CUSTO_ANONIMO:
+                await interaction.followup.send(
+                    f"❌ Você não tem flingers suficientes! O custo é **{CUSTO_ANONIMO} flingers**.", ephemeral=True
+                )
+                return
 
-        novo_saldo = row[0] - CUSTO_ANONIMO
-        c.execute("UPDATE usuarios SET flingers = ? WHERE id = ? AND guild_id = ?", (novo_saldo, autor.id, guild_id))
-        conn.commit()
-        conn.close()
+            novo_saldo = row[0] - CUSTO_ANONIMO
+            c.execute("UPDATE usuarios SET flingers = ? WHERE id = ? AND guild_id = ?", (novo_saldo, autor.id, guild_id))
+            conn.commit()
 
         try:
             embed_msg = discord.Embed(
@@ -330,7 +328,11 @@ class UtilityCog(commands.Cog):
                     def check(m):
                         return m.author == destinatario and isinstance(m.channel, discord.DMChannel)
 
-                    guess_msg      = await self.bot.wait_for("message", check=check)
+                    try:
+                        guess_msg = await self.bot.wait_for("message", check=check, timeout=300)
+                    except asyncio.TimeoutError:
+                        await destinatario.send("⏰ Tempo esgotado! Você não respondeu a tempo.")
+                        return
                     tentativa_nome = guess_msg.content.strip().lower()
                     nome_autor     = autor.name.lower()
 
@@ -371,14 +373,13 @@ class UtilityCog(commands.Cog):
 
         except Exception as e:
             # Devolve os flingers se falhou ao enviar
-            conn = sqlite3.connect("usuarios.db")
-            c    = conn.cursor()
-            c.execute(
+            with sqlite3.connect("usuarios.db") as conn:
+                c = conn.cursor()
+                c.execute(
                 "UPDATE usuarios SET flingers = flingers + ? WHERE id = ? AND guild_id = ?",
                 (CUSTO_ANONIMO, autor.id, guild_id)
-            )
-            conn.commit()
-            conn.close()
+                )
+                conn.commit()
 
             await interaction.followup.send(
                 "❌ Não consegui enviar a mensagem. Talvez o usuário tenha DMs fechadas.\n"

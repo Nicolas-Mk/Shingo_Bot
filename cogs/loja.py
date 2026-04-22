@@ -11,38 +11,35 @@ from discord import app_commands
 # ──────────────────────────────────────────────
 
 def _get_item(guild_id: int, item_id: int) -> dict | None:
-    conn = sqlite3.connect("usuarios.db")
-    c    = conn.cursor()
-    c.execute(
+    with sqlite3.connect("usuarios.db") as conn:
+        c = conn.cursor()
+        c.execute(
         "SELECT id, nome, descricao, preco, estoque, ativo, icone FROM loja_itens WHERE id = ? AND guild_id = ?",
         (item_id, guild_id)
-    )
-    row = c.fetchone()
-    conn.close()
+        )
+        row = c.fetchone()
     if not row:
         return None
     return {"id": row[0], "nome": row[1], "descricao": row[2], "preco": row[3], "estoque": row[4], "ativo": row[5], "icone": row[6]}
 
 
 def _estoque_vendido(item_id: int) -> int:
-    conn = sqlite3.connect("usuarios.db")
-    c    = conn.cursor()
-    c.execute("SELECT COALESCE(SUM(quantidade), 0) FROM loja_compras WHERE item_id = ?", (item_id,))
-    total = c.fetchone()[0]
-    conn.close()
+    with sqlite3.connect("usuarios.db") as conn:
+        c = conn.cursor()
+        c.execute("SELECT COALESCE(SUM(quantidade), 0) FROM loja_compras WHERE item_id = ?", (item_id,))
+        total = c.fetchone()[0]
     return total
 
 
 def _quantidade_no_inventario(user_id: int, guild_id: int, item_id: int) -> int:
     """Retorna a quantidade disponível no inventário (compras - usos)."""
-    conn = sqlite3.connect("usuarios.db")
-    c    = conn.cursor()
-    c.execute(
+    with sqlite3.connect("usuarios.db") as conn:
+        c = conn.cursor()
+        c.execute(
         "SELECT COALESCE(SUM(quantidade), 0) FROM loja_compras WHERE user_id = ? AND guild_id = ? AND item_id = ?",
         (user_id, guild_id, item_id)
-    )
-    total = c.fetchone()[0]
-    conn.close()
+        )
+        total = c.fetchone()[0]
     return total
 
 
@@ -50,17 +47,16 @@ async def _autocomplete_loja(
     interaction: discord.Interaction,
     current: str,
 ) -> list[app_commands.Choice[str]]:
-    conn = sqlite3.connect("usuarios.db")
-    c    = conn.cursor()
-    c.execute("""
+    with sqlite3.connect("usuarios.db") as conn:
+        c = conn.cursor()
+        c.execute("""
         SELECT i.nome, i.icone, i.preco, i.estoque,
                COALESCE((SELECT SUM(c.quantidade) FROM loja_compras c WHERE c.item_id = i.id), 0)
         FROM loja_itens i
         WHERE i.guild_id = ? AND i.ativo = 1
         ORDER BY i.preco
-    """, (interaction.guild_id,))
-    itens = c.fetchall()
-    conn.close()
+        """, (interaction.guild_id,))
+        itens = c.fetchall()
 
     choices = []
     for nome, icone, preco, estoque, vendidos in itens:
@@ -80,17 +76,16 @@ async def _autocomplete_loja_admin(
     current: str,
 ) -> list[app_commands.Choice[str]]:
     """Inclui itens esgotados — para uso de admins."""
-    conn = sqlite3.connect("usuarios.db")
-    c    = conn.cursor()
-    c.execute("""
+    with sqlite3.connect("usuarios.db") as conn:
+        c = conn.cursor()
+        c.execute("""
         SELECT i.nome, i.icone, i.preco, i.estoque,
                COALESCE((SELECT SUM(c.quantidade) FROM loja_compras c WHERE c.item_id = i.id), 0)
         FROM loja_itens i
         WHERE i.guild_id = ? AND i.ativo = 1
         ORDER BY i.nome
-    """, (interaction.guild_id,))
-    itens = c.fetchall()
-    conn.close()
+        """, (interaction.guild_id,))
+        itens = c.fetchall()
 
     choices = []
     for nome, icone, preco, estoque, vendidos in itens:
@@ -107,9 +102,9 @@ async def _autocomplete_inventario(
     interaction: discord.Interaction,
     current: str,
 ) -> list[app_commands.Choice[str]]:
-    conn = sqlite3.connect("usuarios.db")
-    c    = conn.cursor()
-    c.execute("""
+    with sqlite3.connect("usuarios.db") as conn:
+        c = conn.cursor()
+        c.execute("""
         SELECT i.nome, i.icone, SUM(c.quantidade)
         FROM loja_compras c
         JOIN loja_itens i ON i.id = c.item_id
@@ -117,9 +112,8 @@ async def _autocomplete_inventario(
         GROUP BY c.item_id
         HAVING SUM(c.quantidade) > 0
         ORDER BY i.nome
-    """, (interaction.user.id, interaction.guild_id))
-    itens = c.fetchall()
-    conn.close()
+        """, (interaction.user.id, interaction.guild_id))
+        itens = c.fetchall()
 
     return [
         app_commands.Choice(
@@ -170,19 +164,17 @@ class LojaCog(commands.Cog):
             await interaction.response.send_message("❌ Estoque não pode ser zero. Use -1 para ilimitado.", ephemeral=True)
             return
 
-        conn = sqlite3.connect("usuarios.db")
-        c    = conn.cursor()
-        try:
-            c.execute(
-                "INSERT INTO loja_itens (guild_id, nome, descricao, preco, estoque, icone) VALUES (?, ?, ?, ?, ?, ?)",
-                (interaction.guild_id, nome, descricao, preco, estoque, icone)
-            )
-            conn.commit()
-        except sqlite3.IntegrityError:
-            conn.close()
-            await interaction.response.send_message(f"❌ Já existe um item chamado **{nome}**.", ephemeral=True)
-            return
-        conn.close()
+        with sqlite3.connect("usuarios.db") as conn:
+            c = conn.cursor()
+            try:
+                c.execute(
+                    "INSERT INTO loja_itens (guild_id, nome, descricao, preco, estoque, icone) VALUES (?, ?, ?, ?, ?, ?)",
+                    (interaction.guild_id, nome, descricao, preco, estoque, icone)
+                )
+                conn.commit()
+            except sqlite3.IntegrityError:
+                await interaction.response.send_message(f"❌ Já existe um item chamado **{nome}**.", ephemeral=True)
+                return
 
         estoque_str = "Ilimitado" if estoque == -1 else str(estoque)
         nome_exibido = f"{icone} {nome}" if icone else nome
@@ -199,24 +191,22 @@ class LojaCog(commands.Cog):
     @app_commands.autocomplete(nome=_autocomplete_loja_admin)
     @app_commands.checks.has_permissions(administrator=True)
     async def item_remover(self, interaction: discord.Interaction, nome: str):
-        conn = sqlite3.connect("usuarios.db")
-        c    = conn.cursor()
-        c.execute(
+        with sqlite3.connect("usuarios.db") as conn:
+            c = conn.cursor()
+            c.execute(
             "SELECT id, nome FROM loja_itens WHERE guild_id = ? AND LOWER(nome) = LOWER(?)",
             (interaction.guild_id, nome)
-        )
-        row = c.fetchone()
-        conn.close()
+            )
+            row = c.fetchone()
         item = {"id": row[0], "nome": row[1]} if row else None
 
         if not item:
             await interaction.response.send_message("❌ Item não encontrado.", ephemeral=True)
             return
 
-        conn = sqlite3.connect("usuarios.db")
-        conn.execute("UPDATE loja_itens SET ativo = 0 WHERE id = ?", (item["id"],))
+        with sqlite3.connect("usuarios.db") as conn:
+                    conn.execute("UPDATE loja_itens SET ativo = 0 WHERE id = ?", (item["id"],))
         conn.commit()
-        conn.close()
 
         await interaction.response.send_message(
             f"✅ Item **{item['nome']}** removido da loja.", ephemeral=True
@@ -227,24 +217,22 @@ class LojaCog(commands.Cog):
     @app_commands.autocomplete(nome=_autocomplete_loja_admin)
     @app_commands.checks.has_permissions(administrator=True)
     async def loja_editar_estoque(self, interaction: discord.Interaction, nome: str, estoque: int):
-        conn = sqlite3.connect("usuarios.db")
-        c    = conn.cursor()
-        c.execute(
+        with sqlite3.connect("usuarios.db") as conn:
+            c = conn.cursor()
+            c.execute(
             "SELECT id, nome FROM loja_itens WHERE guild_id = ? AND LOWER(nome) = LOWER(?)",
             (interaction.guild_id, nome)
-        )
-        row = c.fetchone()
-        conn.close()
+            )
+            row = c.fetchone()
         item = {"id": row[0], "nome": row[1]} if row else None
 
         if not item:
             await interaction.response.send_message("❌ Item não encontrado.", ephemeral=True)
             return
 
-        conn = sqlite3.connect("usuarios.db")
-        conn.execute("UPDATE loja_itens SET estoque = ? WHERE id = ?", (estoque, item["id"]))
+        with sqlite3.connect("usuarios.db") as conn:
+                    conn.execute("UPDATE loja_itens SET estoque = ? WHERE id = ?", (estoque, item["id"]))
         conn.commit()
-        conn.close()
 
         estoque_str = "Ilimitado" if estoque == -1 else str(estoque)
         await interaction.response.send_message(
@@ -257,14 +245,13 @@ class LojaCog(commands.Cog):
 
     @app_commands.command(name="loja", description="Veja os itens disponíveis na loja.")
     async def loja(self, interaction: discord.Interaction):
-        conn = sqlite3.connect("usuarios.db")
-        c    = conn.cursor()
-        c.execute(
+        with sqlite3.connect("usuarios.db") as conn:
+            c = conn.cursor()
+            c.execute(
             "SELECT id, nome, descricao, preco, estoque, icone FROM loja_itens WHERE guild_id = ? AND ativo = 1 ORDER BY preco",
             (interaction.guild_id,)
-        )
-        itens = c.fetchall()
-        conn.close()
+            )
+            itens = c.fetchall()
 
         if not itens:
             await interaction.response.send_message("🛒 A loja está vazia por enquanto.", ephemeral=True)
@@ -297,52 +284,55 @@ class LojaCog(commands.Cog):
         user_id   = interaction.user.id
         quantidade = 1
 
-        conn = sqlite3.connect("usuarios.db")
-        c    = conn.cursor()
-        c.execute(
+        with sqlite3.connect("usuarios.db") as conn:
+            c = conn.cursor()
+            c.execute(
             "SELECT id, nome, descricao, preco, estoque, ativo, icone FROM loja_itens WHERE guild_id = ? AND LOWER(nome) = LOWER(?) AND ativo = 1",
             (guild_id, nome)
-        )
-        row = c.fetchone()
-        conn.close()
+            )
+            row = c.fetchone()
         item = {"id": row[0], "nome": row[1], "descricao": row[2], "preco": row[3], "estoque": row[4], "ativo": row[5], "icone": row[6]} if row else None
 
         if not item:
             await interaction.response.send_message("❌ Item não encontrado.", ephemeral=True)
             return
 
-        if item["estoque"] != -1:
-            vendidos   = _estoque_vendido(item["id"])
-            disponivel = item["estoque"] - vendidos
-            if disponivel <= 0:
-                await interaction.response.send_message("❌ Este item está esgotado.", ephemeral=True)
-                return
-
         custo_total = item["preco"] * quantidade
 
-        conn = sqlite3.connect("usuarios.db")
-        c    = conn.cursor()
-        c.execute("SELECT flingers FROM usuarios WHERE id = ? AND guild_id = ?", (user_id, guild_id))
-        row = c.fetchone()
+        with sqlite3.connect("usuarios.db") as conn:
+            c = conn.cursor()
 
-        if not row or (row[0] or 0) < custo_total:
-            conn.close()
-            await interaction.response.send_message(
-                f"❌ Flingers insuficientes. Você precisa de **{custo_total}** e tem **{row[0] if row else 0}**.",
-                ephemeral=True
-            )
-            return
+            # Verifica flingers suficientes
+            c.execute("SELECT flingers FROM usuarios WHERE id = ? AND guild_id = ?", (user_id, guild_id))
+            row = c.fetchone()
+            if not row or (row[0] or 0) < custo_total:
+                await interaction.response.send_message(
+                    f"❌ Flingers insuficientes. Você precisa de **{custo_total}** e tem **{row[0] if row else 0}**.",
+                    ephemeral=True
+                )
+                return
 
-        c.execute(
+            # Verifica estoque dentro da mesma transação, contando compras já registradas
+            if item["estoque"] != -1:
+                c.execute(
+                    "SELECT COALESCE(SUM(quantidade), 0) FROM loja_compras WHERE item_id = ?",
+                    (item["id"],)
+                )
+                vendidos   = c.fetchone()[0]
+                disponivel = item["estoque"] - vendidos
+                if disponivel <= 0:
+                    await interaction.response.send_message("❌ Este item está esgotado.", ephemeral=True)
+                    return
+
+            c.execute(
             "UPDATE usuarios SET flingers = flingers - ? WHERE id = ? AND guild_id = ?",
             (custo_total, user_id, guild_id)
-        )
-        c.execute(
+            )
+            c.execute(
             "INSERT INTO loja_compras (guild_id, user_id, item_id, quantidade, comprado_em) VALUES (?, ?, ?, ?, ?)",
             (guild_id, user_id, item["id"], quantidade, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-        )
-        conn.commit()
-        conn.close()
+            )
+            conn.commit()
 
         embed = discord.Embed(title="✅ Compra realizada!", color=discord.Color.green())
         embed.add_field(name="Item",       value=item["nome"],        inline=True)
@@ -359,14 +349,13 @@ class LojaCog(commands.Cog):
         guild_id = interaction.guild_id
         user_id  = interaction.user.id
 
-        conn = sqlite3.connect("usuarios.db")
-        c    = conn.cursor()
-        c.execute(
+        with sqlite3.connect("usuarios.db") as conn:
+            c = conn.cursor()
+            c.execute(
             "SELECT id, nome, descricao, preco, estoque, ativo, icone FROM loja_itens WHERE guild_id = ? AND LOWER(nome) = LOWER(?)",
             (guild_id, nome)
-        )
-        row = c.fetchone()
-        conn.close()
+            )
+            row = c.fetchone()
         item = {"id": row[0], "nome": row[1], "descricao": row[2], "preco": row[3], "estoque": row[4], "ativo": row[5], "icone": row[6]} if row else None
 
         if not item:
@@ -380,13 +369,12 @@ class LojaCog(commands.Cog):
             )
             return
 
-        conn = sqlite3.connect("usuarios.db")
-        conn.execute(
+        with sqlite3.connect("usuarios.db") as conn:
+                    conn.execute(
             "INSERT INTO loja_compras (guild_id, user_id, item_id, quantidade, comprado_em) VALUES (?, ?, ?, ?, ?)",
             (guild_id, user_id, item["id"], -1, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
         )
         conn.commit()
-        conn.close()
 
         embed = discord.Embed(
             title="🎁 Item usado!",
@@ -399,9 +387,9 @@ class LojaCog(commands.Cog):
 
     @app_commands.command(name="inventario", description="Veja os itens que você possui.")
     async def inventario(self, interaction: discord.Interaction):
-        conn = sqlite3.connect("usuarios.db")
-        c    = conn.cursor()
-        c.execute("""
+        with sqlite3.connect("usuarios.db") as conn:
+            c = conn.cursor()
+            c.execute("""
             SELECT i.id, i.nome, i.descricao, i.icone, SUM(c.quantidade)
             FROM loja_compras c
             JOIN loja_itens i ON i.id = c.item_id
@@ -409,9 +397,8 @@ class LojaCog(commands.Cog):
             GROUP BY c.item_id
             HAVING SUM(c.quantidade) > 0
             ORDER BY i.nome
-        """, (interaction.user.id, interaction.guild_id))
-        itens = c.fetchall()
-        conn.close()
+            """, (interaction.user.id, interaction.guild_id))
+            itens = c.fetchall()
 
         if not itens:
             await interaction.response.send_message("🎒 Seu inventário está vazio.", ephemeral=True)
@@ -452,38 +439,35 @@ class LojaCog(commands.Cog):
             await interaction.response.send_message("❌ A quantidade deve ser maior que zero.", ephemeral=True)
             return
 
-        conn = sqlite3.connect("usuarios.db")
-        c    = conn.cursor()
+        with sqlite3.connect("usuarios.db") as conn:
+            c = conn.cursor()
 
-        c.execute("SELECT flingers FROM usuarios WHERE id = ? AND guild_id = ?", (remetente.id, guild_id))
-        row_rem = c.fetchone()
-        if not row_rem or (row_rem[0] or 0) < quantidade:
-            conn.close()
-            await interaction.response.send_message(
-                f"❌ Flingers insuficientes. Você tem **{row_rem[0] if row_rem else 0}** e tentou transferir **{quantidade}**.",
-                ephemeral=True
-            )
-            return
+            c.execute("SELECT flingers FROM usuarios WHERE id = ? AND guild_id = ?", (remetente.id, guild_id))
+            row_rem = c.fetchone()
+            if not row_rem or (row_rem[0] or 0) < quantidade:
+                await interaction.response.send_message(
+                    f"❌ Flingers insuficientes. Você tem **{row_rem[0] if row_rem else 0}** e tentou transferir **{quantidade}**.",
+                    ephemeral=True
+                )
+                return
 
-        c.execute("SELECT flingers FROM usuarios WHERE id = ? AND guild_id = ?", (destinatario.id, guild_id))
-        row_dest = c.fetchone()
-        if not row_dest:
-            conn.close()
-            await interaction.response.send_message(
-                f"❌ {destinatario.mention} não está registrado neste servidor.", ephemeral=True
-            )
-            return
+            c.execute("SELECT flingers FROM usuarios WHERE id = ? AND guild_id = ?", (destinatario.id, guild_id))
+            row_dest = c.fetchone()
+            if not row_dest:
+                await interaction.response.send_message(
+                    f"❌ {destinatario.mention} não está registrado neste servidor.", ephemeral=True
+                )
+                return
 
-        c.execute(
+            c.execute(
             "UPDATE usuarios SET flingers = flingers - ? WHERE id = ? AND guild_id = ?",
             (quantidade, remetente.id, guild_id)
-        )
-        c.execute(
+            )
+            c.execute(
             "UPDATE usuarios SET flingers = flingers + ? WHERE id = ? AND guild_id = ?",
             (quantidade, destinatario.id, guild_id)
-        )
-        conn.commit()
-        conn.close()
+            )
+            conn.commit()
 
         embed = discord.Embed(title="💸 Transferência realizada!", color=discord.Color.green())
         embed.add_field(name="De",         value=remetente.mention,    inline=True)

@@ -30,8 +30,8 @@ class UserProfileCog(commands.Cog):
         return int(xp_total)
 
     def dar_xp(self, usuario_id, guild_id, nome, discriminator):
-        conn  = sqlite3.connect('usuarios.db')
-        c     = conn.cursor()
+        with sqlite3.connect('usuarios.db') as conn:
+            c = conn.cursor()
         c.execute(
             "SELECT xp, nivel, ultimo_xp FROM usuarios WHERE id = ? AND guild_id = ?",
             (usuario_id, guild_id)
@@ -62,10 +62,8 @@ class UserProfileCog(commands.Cog):
                     (xp, nivel, agora, usuario_id, guild_id)
                 )
                 conn.commit()
-                conn.close()
                 return upou, nivel
             else:
-                conn.close()
                 return False, nivel
         else:
             # Usuário ainda não registrado neste servidor — cria o registro automaticamente
@@ -75,7 +73,6 @@ class UserProfileCog(commands.Cog):
             """, (usuario_id, guild_id, nome, discriminator,
                   discord.utils.utcnow().strftime('%Y-%m-%d %H:%M:%S'), agora))
             conn.commit()
-            conn.close()
             return False, 1
 
     @commands.Cog.listener()
@@ -99,8 +96,8 @@ class UserProfileCog(commands.Cog):
     async def perfil(self, interaction: discord.Interaction):
         user     = interaction.user
         guild_id = interaction.guild_id
-        conn     = sqlite3.connect('usuarios.db')
-        c        = conn.cursor()
+        with sqlite3.connect('usuarios.db') as conn:
+            c = conn.cursor()
 
         c.execute("""
             SELECT nome, discriminator, data_registro, descricao, xp, nivel, flingers
@@ -109,7 +106,6 @@ class UserProfileCog(commands.Cog):
         """, (user.id, guild_id))
 
         dados = c.fetchone()
-        conn.close()
 
         if dados:
             nome, discriminator, data_registro, descricao, xp, nivel, flingers = dados
@@ -130,20 +126,19 @@ class UserProfileCog(commands.Cog):
     @app_commands.command(name="editarperfil", description="Edite a descrição do seu perfil")
     @app_commands.describe(descricao="Sua nova descrição")
     async def editarperfil(self, interaction: discord.Interaction, descricao: str):
-        conn = sqlite3.connect('usuarios.db')
-        c    = conn.cursor()
+        with sqlite3.connect('usuarios.db') as conn:
+            c = conn.cursor()
         c.execute(
             "UPDATE usuarios SET descricao = ? WHERE id = ? AND guild_id = ?",
             (descricao, interaction.user.id, interaction.guild_id)
         )
         conn.commit()
-        conn.close()
         await interaction.response.send_message("✅ Sua descrição foi atualizada com sucesso!", ephemeral=True)
 
     @app_commands.command(name="topnivel", description="Veja os usuários com mais nível e XP")
     async def topnivel(self, interaction: discord.Interaction):
-        conn = sqlite3.connect('usuarios.db')
-        c    = conn.cursor()
+        with sqlite3.connect('usuarios.db') as conn:
+            c = conn.cursor()
         c.execute("""
             SELECT nome, discriminator, nivel, xp
             FROM usuarios
@@ -152,7 +147,6 @@ class UserProfileCog(commands.Cog):
             LIMIT 10
         """, (interaction.guild_id,))
         top = c.fetchall()
-        conn.close()
 
         if not top:
             await interaction.response.send_message("⚠️ Ninguém possui nível ainda!", ephemeral=True)

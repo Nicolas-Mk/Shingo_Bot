@@ -24,8 +24,8 @@ CANAIS_VALIDOS = {
 
 
 def criar_tabela_config():
-    conn = sqlite3.connect("usuarios.db")
-    c    = conn.cursor()
+    with sqlite3.connect("usuarios.db") as conn:
+        c = conn.cursor()
     c.execute("""
         CREATE TABLE IF NOT EXISTS guild_config (
             guild_id         INTEGER NOT NULL,
@@ -35,41 +35,37 @@ def criar_tabela_config():
         )
     """)
     conn.commit()
-    conn.close()
 
 
 def get_config(guild_id: int, chave: str) -> int | None:
     """Retorna o valor inteiro de uma configuração, ou None se não definida."""
-    conn = sqlite3.connect("usuarios.db")
-    c    = conn.cursor()
+    with sqlite3.connect("usuarios.db") as conn:
+        c = conn.cursor()
     c.execute(
         "SELECT valor FROM guild_config WHERE guild_id = ? AND chave = ?",
         (guild_id, chave)
     )
     row = c.fetchone()
-    conn.close()
     return int(row[0]) if row else None
 
 
 def set_config(guild_id: int, chave: str, valor: int):
-    conn = sqlite3.connect("usuarios.db")
-    c    = conn.cursor()
+    with sqlite3.connect("usuarios.db") as conn:
+        c = conn.cursor()
     c.execute("""
         INSERT INTO guild_config (guild_id, chave, valor)
         VALUES (?, ?, ?)
         ON CONFLICT(guild_id, chave) DO UPDATE SET valor = excluded.valor
     """, (guild_id, chave, str(valor)))
     conn.commit()
-    conn.close()
 
 
 def get_all_config(guild_id: int) -> dict[str, int]:
     """Retorna todas as configurações de um servidor."""
-    conn = sqlite3.connect("usuarios.db")
-    c    = conn.cursor()
+    with sqlite3.connect("usuarios.db") as conn:
+        c = conn.cursor()
     c.execute("SELECT chave, valor FROM guild_config WHERE guild_id = ?", (guild_id,))
     rows = c.fetchall()
-    conn.close()
     return {chave: int(valor) for chave, valor in rows}
 
 

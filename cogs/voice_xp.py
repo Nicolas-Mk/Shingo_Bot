@@ -41,8 +41,8 @@ class VoiceXPCog(commands.Cog):
 
                 if minutos_validos >= 15:
                     xp_ganho = int(minutos_validos // 15) * 3
-                    conn = sqlite3.connect('usuarios.db')
-                    c    = conn.cursor()
+                    with sqlite3.connect('usuarios.db') as conn:
+                        c = conn.cursor()
                     c.execute(
                         "SELECT xp, nivel FROM usuarios WHERE id = ? AND guild_id = ?",
                         (member.id, member.guild.id)
@@ -73,7 +73,6 @@ class VoiceXPCog(commands.Cog):
                         )
                         conn.commit()
 
-                    conn.close()
 
         # Mudou estado de mute dentro da call
         elif before.channel is not None and after.channel is not None:

@@ -34,29 +34,21 @@ class GamesCog(commands.Cog):
             await interaction.response.send_message("❌ Aposta inválida. Escolha um valor maior que zero.", ephemeral=True)
             return
 
-        conn = sqlite3.connect("usuarios.db")
-        c    = conn.cursor()
-        c.execute(
-            "SELECT flingers FROM usuarios WHERE id = ? AND guild_id = ?",
-            (user_id, guild_id)
-        )
-        row = c.fetchone()
-        conn.close()
+        # Verificação e débito na mesma transação — evita race condition
+        with sqlite3.connect("usuarios.db") as conn:
+            c = conn.cursor()
+            c.execute(
+            "UPDATE usuarios SET flingers = flingers - ? WHERE id = ? AND guild_id = ? AND flingers >= ?",
+            (valor, user_id, guild_id, valor)
+            )
+            atualizado = c.rowcount
+            conn.commit()
 
-        if not row or row[0] is None or row[0] < valor:
+        if atualizado == 0:
             await interaction.response.send_message("❌ Você não tem flingers suficientes para essa aposta.", ephemeral=True)
             return
 
         await interaction.response.defer()
-
-        conn = sqlite3.connect("usuarios.db")
-        c    = conn.cursor()
-        c.execute(
-            "UPDATE usuarios SET flingers = flingers - ? WHERE id = ? AND guild_id = ?",
-            (valor, user_id, guild_id)
-        )
-        conn.commit()
-        conn.close()
 
         self.ultimo_blackjack[key] = agora
 
@@ -65,7 +57,7 @@ class GamesCog(commands.Cog):
 
         embed = discord.Embed(title="🃏 Blackjack")
         embed.add_field(name="Sua mão", value=f"{' | '.join(view.player_hand)}\n**Total: {player_total}**", inline=True)
-        embed.add_field(name="Dealer",  value=f"{view.dealer_hand[0]} | ❓", inline=True)
+        embed.add_field(name="Dealer",  value=f"{view.dealer_hand[0]} | ❓\n*({len(view.dealer_hand)} cartas)*", inline=True)
 
         try:
             await interaction.followup.send(
@@ -74,14 +66,13 @@ class GamesCog(commands.Cog):
                 view=view,
             )
         except Exception as e:
-            conn = sqlite3.connect("usuarios.db")
-            c    = conn.cursor()
-            c.execute(
+            with sqlite3.connect("usuarios.db") as conn:
+                c = conn.cursor()
+                c.execute(
                 "UPDATE usuarios SET flingers = flingers + ? WHERE id = ? AND guild_id = ?",
                 (valor, user_id, guild_id)
-            )
-            conn.commit()
-            conn.close()
+                )
+                conn.commit()
             self.ultimo_blackjack.pop(key, None)
             print(f"[Blackjack] Erro ao enviar mensagem, flingers devolvidos para {interaction.user}: {e}")
 

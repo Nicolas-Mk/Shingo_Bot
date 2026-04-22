@@ -31,11 +31,10 @@ STATUS_LABEL_MANGA = {
 
 
 def _carregar_usuarios(guild_id: int) -> list[str]:
-    conn = sqlite3.connect("usuarios.db")
-    c    = conn.cursor()
+    with sqlite3.connect("usuarios.db") as conn:
+        c = conn.cursor()
     c.execute("SELECT username FROM mal_usuarios WHERE guild_id = ?", (guild_id,))
     rows = c.fetchall()
-    conn.close()
     return [r[0] for r in rows]
 
 
