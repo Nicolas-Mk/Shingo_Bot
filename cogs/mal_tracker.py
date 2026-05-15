@@ -251,6 +251,69 @@ def salvar_snapshots_em_lote(
 
 
 # ──────────────────────────────────────────────
+#  Persistência — favoritos
+# ──────────────────────────────────────────────
+
+JIKAN_BASE = "https://api.jikan.moe/v4"
+
+
+async def buscar_ids_favoritos_jikan(
+    session: aiohttp.ClientSession, username: str
+) -> set[str] | None:
+    """
+    Consulta a API do Jikan e retorna os anime_ids dos favoritos do usuário.
+    Retorna None em caso de erro de rede (para não zerar dados por falha temporária).
+    Retorna set vazio se o usuário não tem favoritos ou a lista é privada.
+    """
+    url = f"{JIKAN_BASE}/users/{username}/favorites"
+    try:
+        async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+            if resp.status == 200:
+                data = await resp.json()
+                animes = data.get("data", {}).get("anime", [])
+                return {str(a["mal_id"]) for a in animes if "mal_id" in a}
+            elif resp.status in (403, 404):
+                # Lista privada ou usuário não encontrado — retorna vazio (não é erro)
+                return set()
+            else:
+                print(f"[MAL Tracker] Jikan retornou {resp.status} para '{username}' (favoritos).")
+                return None  # Erro temporário — não atualiza o banco
+    except asyncio.TimeoutError:
+        print(f"[MAL Tracker] Timeout ao buscar favoritos de '{username}'.")
+        return None
+    except Exception as e:
+        print(f"[MAL Tracker] Erro ao buscar favoritos de '{username}': {e}")
+        return None
+
+
+def atualizar_favoritos_db(username: str, ids_favoritos: set[str]):
+    """
+    Atualiza is_favorite em mal_snapshots para o usuário:
+      - 1 para os item_ids presentes em ids_favoritos
+      - 0 para todos os outros animes do usuário
+    """
+    with sqlite3.connect("usuarios.db") as conn:
+        if ids_favoritos:
+            placeholders = ",".join("?" * len(ids_favoritos))
+            conn.execute(
+                f"UPDATE mal_snapshots SET is_favorite = 1 "
+                f"WHERE username = ? AND tipo = 'anime' AND item_id IN ({placeholders})",
+                (username, *ids_favoritos),
+            )
+            conn.execute(
+                f"UPDATE mal_snapshots SET is_favorite = 0 "
+                f"WHERE username = ? AND tipo = 'anime' AND item_id NOT IN ({placeholders})",
+                (username, *ids_favoritos),
+            )
+        else:
+            conn.execute(
+                "UPDATE mal_snapshots SET is_favorite = 0 WHERE username = ? AND tipo = 'anime'",
+                (username,),
+            )
+        conn.commit()
+
+
+# ──────────────────────────────────────────────
 #  Utilitário de imagem
 # ──────────────────────────────────────────────
 
@@ -390,11 +453,29 @@ class MalTrackerCog(commands.Cog):
 
         print(f"[MAL Tracker] ✅ Sync completo de '{username}' ({tipo}): {total} itens.")
 
+    async def _sincronizar_favoritos_usuario(self, username: str):
+        """
+        Consulta o Jikan e atualiza is_favorite no banco para o usuário.
+        Chamado no boot, ao adicionar um usuário e a cada ciclo do loop horário.
+        Não faz nada se a resposta do Jikan indicar erro temporário (None).
+        """
+        session = await self._get_session()
+        ids_favoritos = await buscar_ids_favoritos_jikan(session, username)
+        if ids_favoritos is None:
+            # Erro de rede — mantém os dados anteriores intactos
+            return
+        atualizar_favoritos_db(username, ids_favoritos)
+        print(
+            f"[MAL Tracker] Favoritos de '{username}' atualizados "
+            f"({len(ids_favoritos)} anime(s) marcado(s))."
+        )
+
     async def _sincronizar_usuario_completo(self, username: str):
         """
         Dispara a sincronização completa de anime + manga para um usuário.
         Idempotente: não faz nada se o usuário já tiver snapshots.
         Usa _sync_em_andamento para evitar execuções paralelas.
+        Ao final, sincroniza também os favoritos via Jikan.
         """
         if username in self._sync_em_andamento:
             print(f"[MAL Tracker] Sync de '{username}' já em andamento, pulando.")
@@ -407,9 +488,10 @@ class MalTrackerCog(commands.Cog):
         try:
             await self._sincronizar_lista_completa(username, "anime")
             await self._sincronizar_lista_completa(username, "manga")
+            # Popula favoritos logo após o sync completo
+            await self._sincronizar_favoritos_usuario(username)
         finally:
             self._sync_em_andamento.discard(username)
-
     # ──────────────────────────────────────────
     #  Avatar
     # ──────────────────────────────────────────
@@ -838,6 +920,9 @@ class MalTrackerCog(commands.Cog):
         self._cache_mudancas_ciclo = {}
         for username in todos_usuarios:
             self._cache_mudancas_ciclo[username] = await self._detectar_mudancas_usuario(username)
+            # Atualiza favoritos via Jikan a cada ciclo
+            await self._sincronizar_favoritos_usuario(username)
+            await asyncio.sleep(0.5)  # respeita rate limit do Jikan
 
         # ── Fase 2: relatório — cada guild filtra e envia ────────────────────
         async def processar_guild(guild):
@@ -916,6 +1001,8 @@ class MalTrackerCog(commands.Cog):
                 ephemeral=True
             )
         else:
+            # Usuário já sincronizado — atualiza favoritos imediatamente
+            asyncio.create_task(self._sincronizar_favoritos_usuario(username))
             await interaction.followup.send(
                 f"✅ `{username}` adicionado ao monitoramento! Será incluído no próximo relatório.",
                 ephemeral=True

@@ -14,6 +14,7 @@ from cogs.utility import UtilityCog
 from cogs.mal_tracker import MalTrackerCog
 from cogs.loja import LojaCog
 from cogs.mal_lookup import MalLookupCog
+from cogs.mal_top import MalTopCog
 
 
 
@@ -39,6 +40,7 @@ class CustomBot(commands.Bot):
         await self.add_cog(UtilityCog(self))
         await self.add_cog(MalTrackerCog(self))
         await self.add_cog(MalLookupCog(self))
+        await self.add_cog(MalTopCog(self))
         await self.add_cog(LojaCog(self))
 
         synced = await self.tree.sync()

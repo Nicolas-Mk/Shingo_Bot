@@ -50,3 +50,5 @@ migrations/__pycache__/V007__criar_tabela_mal_avatares.cpython-313.pyc
 migrations/__pycache__/V008__remover_icon_mal_usuarios.cpython-313.pyc
 migrations/__pycache__/V009__criar_tabela_snapshots.cpython-313.pyc
 migrations/__pycache__/V010__corrigir_pk_mal_snapshots.cpython-313.pyc
+cogs/__pycache__/mal_top.cpython-313.pyc
+migrations/__pycache__/V011__adicionar_favoritos_mal_snapshots.cpython-313.pyc

@@ -273,9 +273,13 @@ class UtilityCog(commands.Cog):
     # ──────────────────────────────────────────
 
     @app_commands.command(name="clima", description="Veja a previsão do tempo para sua cidade")
-    async def clima(self, interaction: discord.Interaction, cidade: str):
+    @app_commands.describe(
+        cidade="Nome da cidade (ex: Vitória)",
+        estado="Estado ou UF para desambiguar cidades com nomes iguais (ex: ES, SP)",
+    )
+    async def clima(self, interaction: discord.Interaction, cidade: str, estado: str | None = None):
         await interaction.response.defer()
-        embed, error = await get_weather(cidade)
+        embed, error = await get_weather(cidade, estado)
         if embed:
             await interaction.followup.send(embed=embed)
         else:

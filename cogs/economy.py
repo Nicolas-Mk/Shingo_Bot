@@ -220,8 +220,9 @@ class EconomyCog(commands.Cog):
         agora    = datetime.now(timezone.utc)
         anterior = self.ultimo_trabalho.get((user_id, guild_id))
 
-        if anterior and (agora - anterior).total_seconds() < 600:
-            restante = 600 - int((agora - anterior).total_seconds())
+        cooldown_aplicado = self.ultimo_trabalho.get((user_id, guild_id, "cooldown"), 600)
+        if anterior and (agora - anterior).total_seconds() < cooldown_aplicado:
+            restante = cooldown_aplicado - int((agora - anterior).total_seconds())
             minutos  = restante // 60
             segundos = restante % 60
             return await interaction.response.send_message(
@@ -239,12 +240,25 @@ class EconomyCog(commands.Cog):
         maximo = 5 + faixa * 3
 
         ganho = random.randint(minimo, maximo)
+
+        hora_extra = random.random() < 0.10
+        if hora_extra:
+            ganho *= 5
+
         UserManager.adicionar_flingers(user_id, guild_id, ganho)
         self.ultimo_trabalho[(user_id, guild_id)] = agora
+        cooldown = 1200 if hora_extra else 600
+        self.ultimo_trabalho[(user_id, guild_id, "cooldown")] = cooldown
 
-        await interaction.response.send_message(
-            f"🛠️ {interaction.user.mention}, você trabalhou duro e ganhou **{ganho} flingers!**"
-        )
+        if hora_extra:
+            await interaction.response.send_message(
+                f"⚡ {interaction.user.mention}, você fez **hora extra** e ganhou **{ganho} flingers!** "
+                f"(5x bônus!) Mas está exausto... descanse por **20 minutos**."
+            )
+        else:
+            await interaction.response.send_message(
+                f"🛠️ {interaction.user.mention}, você trabalhou duro e ganhou **{ganho} flingers!**"
+            )
 
     @app_commands.command(name="gerador", description="Habilita ou desabilita o gerador de texto aleatório")
     async def toggle_gerador(self, interaction: discord.Interaction):
