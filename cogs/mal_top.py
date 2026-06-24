@@ -13,21 +13,10 @@ from cogs.config_cog import get_config
 MAL_API_BASE = "https://api.myanimelist.net/v2"
 BRASILIA = timezone(timedelta(hours=-3))
 
-# ──────────────────────────────────────────────────────────────────
-#  Pontuação do Top do Servidor
-#
-#  Regras:
-#  1. Para cada usuário, pega os top 10 animes com maior nota pessoal.
-#     Cada anime que aparece no top de alguém ganha +5 pontos.
-#  2. Para cada anime assistido por mais de MIN_MEMBROS membros,
-#     calcula a média das notas do servidor (somente notas > 0).
-#     Essa média é somada à pontuação do anime.
-#  3. O ranking final ordena por pontuação total (top_pts + media_srv).
-# ──────────────────────────────────────────────────────────────────
-
-PONTOS_TOP = 0.5         # pontos por aparecer no top-10 pessoal de um membro
-MIN_MEMBROS = 3         # mínimo de membros que assistiram p/ entrar na média
-TOP_SERVIDOR_SIZE = 10  # quantos animes mostrar no resultado final
+PONTOS_TOP = 0.5         # pontos por aparecer nos favoritos do MAL de um membro
+MIN_MEMBROS = 5         # mínimo de membros que assistiram p/ entrar na média
+TOP_SERVIDOR_SIZE = 50  # quantos animes compõem o ranking total
+PAGE_SIZE = 10           # itens exibidos por página
 
 
 # ──────────────────────────────────────────────────────────────────
@@ -43,11 +32,6 @@ def carregar_usuarios(guild_id: int) -> list[str]:
 
 
 def carregar_snapshots_anime(username: str) -> list[dict]:
-    """
-    Retorna todos os snapshots de anime do usuário como lista de dicts,
-    incluindo o item_id e is_favorite para consulta posterior.
-    Formato: [{"item_id": str, "score": int, "is_favorite": bool, ...}, ...]
-    """
     with sqlite3.connect("usuarios.db") as conn:
         c = conn.cursor()
         c.execute(
@@ -73,26 +57,7 @@ def carregar_snapshots_anime(username: str) -> list[dict]:
 #  Lógica de ranking
 # ──────────────────────────────────────────────────────────────────
 
-def calcular_ranking(
-    todos_snapshots: dict[str, list[dict]]
-) -> list[dict]:
-    """
-    Recebe { username: [snap, ...] } com snaps de anime de todos os usuários.
-    Retorna lista ordenada por pontuação:
-      [
-        {
-          "item_id": str,
-          "pontos_top": int,      # quantas vezes apareceu em top-10 × PONTOS_TOP
-          "media_servidor": float,  # média das notas do servidor (0 se < MIN_MEMBROS)
-          "pontuacao_total": float,
-          "membros_assistiram": int,
-          "notas": [int, ...],    # notas de cada membro (somente > 0)
-          "membros_no_top": [str, ...],  # usernames cujo top-10 inclui este anime
-        },
-        ...
-      ]
-    """
-    # item_id → dados acumulados
+def calcular_ranking(todos_snapshots: dict[str, list[dict]]) -> list[dict]:
     acumulado: dict[str, dict] = {}
 
     def get_or_create(item_id: str) -> dict:
@@ -107,15 +72,13 @@ def calcular_ranking(
         return acumulado[item_id]
 
     for username, snaps in todos_snapshots.items():
-        # Top pessoal = animes marcados como favorito no MAL pelo usuário
         top_ids = {s["item_id"] for s in snaps if s.get("is_favorite")}
 
         for snap in snaps:
             item_id = snap["item_id"]
             score = snap.get("score", 0)
-
-            # Conta como "assistido" se tem status completed, ou qualquer nota
             status = snap.get("status", "")
+
             if status not in ("completed", "watching", "on_hold", "dropped") and score == 0:
                 continue
 
@@ -129,7 +92,6 @@ def calcular_ranking(
                 entrada["pontos_top"] += PONTOS_TOP
                 entrada["membros_no_top"].append(username)
 
-    # Calcula médias e pontuação final
     resultado = []
     for item_id, dados in acumulado.items():
         notas = dados["notas"]
@@ -139,12 +101,10 @@ def calcular_ranking(
             continue
 
         media = round(sum(notas) / len(notas), 2) if len(notas) >= MIN_MEMBROS else 0.0
-
         dados["media_servidor"] = media
         dados["pontuacao_total"] = dados["pontos_top"] + media
         resultado.append(dados)
 
-    # Ordena: pontuação total ↓, depois membros que assistiram ↓
     resultado.sort(key=lambda x: (x["pontuacao_total"], x["membros_assistiram"]), reverse=True)
     return resultado[:TOP_SERVIDOR_SIZE]
 
@@ -158,10 +118,6 @@ async def buscar_titulos_mal(
     item_ids: list[str],
     mal_client_id: str,
 ) -> dict[str, dict]:
-    """
-    Busca título e capa de cada anime_id na API do MAL.
-    Retorna { item_id: {"title": str, "image_url": str | None} }
-    """
     import os
     headers = {"X-MAL-CLIENT-ID": mal_client_id or os.getenv("MAL_CLIENT_ID", "")}
     titulos = {}
@@ -188,7 +144,6 @@ async def buscar_titulos_mal(
         except Exception:
             titulos[item_id] = {"title": f"Anime #{item_id}", "image_url": None}
 
-    # Busca em paralelo com semáforo para não estourar o rate limit
     sem = asyncio.Semaphore(5)
 
     async def fetch_with_sem(item_id):
@@ -201,18 +156,169 @@ async def buscar_titulos_mal(
 
 
 # ──────────────────────────────────────────────────────────────────
+#  Montagem de embed por página
+# ──────────────────────────────────────────────────────────────────
+
+def build_embed(
+    ranking: list[dict],
+    titulos: dict[str, dict],
+    page: int,
+    total_pages: int,
+    num_usuarios: int,
+) -> discord.Embed:
+    agora = datetime.now(BRASILIA).strftime("%d/%m/%Y %H:%M")
+
+    start = page * PAGE_SIZE
+    end = start + PAGE_SIZE
+    itens_pagina = ranking[start:end]
+
+    medalhas = {1: "🥇", 2: "🥈", 3: "🥉"}
+
+    embed = discord.Embed(
+        title="🏆 Top do Servidor — MyAnimeList",
+        description=f"Baseado em **{num_usuarios}** usuário(s) · {agora}",
+        color=0x2E51A2,
+    )
+    embed.set_thumbnail(
+        url="https://image.myanimelist.net/ui/OK6W_koKDTOqqqLDbIoPAiC8a86sHufn_jOI-JGtoCQ"
+    )
+
+    for entry in itens_pagina:
+        pos = ranking.index(entry) + 1
+        item_id = entry["item_id"]
+        info = titulos.get(item_id, {})
+        titulo = info.get("title", f"Anime #{item_id}")
+        url = f"https://myanimelist.net/anime/{item_id}"
+
+        pontos_top = entry["pontos_top"]
+        media_srv = entry["media_servidor"]
+        membros = entry["membros_assistiram"]
+        membros_no_top = entry["membros_no_top"]
+        total = entry["pontuacao_total"]
+
+        prefixo = medalhas.get(pos, f"#{pos}")
+
+        # Linha 1: posição + título linkado
+        # Linhas seguintes: detalhes
+        linhas = [f"**{prefixo}**  [{titulo}]({url})"]
+
+        if media_srv > 0:
+            linhas.append(f"📊 Média servidor: **{media_srv:.2f}/10** ({membros} membros)")
+        else:
+            linhas.append(f"👥 {membros} membro(s) assistiram")
+
+        if pontos_top > 0:
+            tops_count = int(round(pontos_top / PONTOS_TOP))
+            nomes = ", ".join(f"`{u}`" for u in membros_no_top[:5])
+            if len(membros_no_top) > 5:
+                nomes += f" +{len(membros_no_top) - 5}"
+            linhas.append(f"🌟 Favorito de: **{tops_count}** membro(s): {nomes}")
+
+        linhas.append(f"🧮 Total: **{total:.1f} pts**")
+
+        embed.add_field(
+            name="\u200b",
+            value="\n".join(linhas),
+            inline=False,
+        )
+
+    embed.set_footer(
+        text=(
+            f"Página {page + 1}/{total_pages} · "
+            f"Média = mín. {MIN_MEMBROS} membros com nota"
+        )
+    )
+    return embed
+
+
+# ──────────────────────────────────────────────────────────────────
+#  View de paginação
+# ──────────────────────────────────────────────────────────────────
+
+class RankingView(discord.ui.View):
+    def __init__(
+        self,
+        ranking: list[dict],
+        titulos: dict[str, dict],
+        num_usuarios: int,
+        autor_id: int,
+    ):
+        super().__init__(timeout=300)
+        self.ranking = ranking
+        self.titulos = titulos
+        self.num_usuarios = num_usuarios
+        self.autor_id = autor_id
+        self.page = 0
+        self.total_pages = (len(ranking) + PAGE_SIZE - 1) // PAGE_SIZE
+        self._atualizar_botoes()
+
+    def _atualizar_botoes(self):
+        self.btn_primeira.disabled = self.page == 0
+        self.btn_anterior.disabled = self.page == 0
+        self.btn_proxima.disabled = self.page >= self.total_pages - 1
+        self.btn_ultima.disabled = self.page >= self.total_pages - 1
+
+    def embed_atual(self) -> discord.Embed:
+        return build_embed(
+            self.ranking, self.titulos, self.page,
+            self.total_pages, self.num_usuarios
+        )
+
+    async def _checar_autor(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.autor_id:
+            await interaction.response.send_message(
+                "❌ Apenas quem usou o comando pode navegar nas páginas.",
+                ephemeral=True,
+            )
+            return False
+        return True
+
+    @discord.ui.button(label="⏮", style=discord.ButtonStyle.secondary)
+    async def btn_primeira(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await self._checar_autor(interaction):
+            return
+        self.page = 0
+        self._atualizar_botoes()
+        await interaction.response.edit_message(embed=self.embed_atual(), view=self)
+
+    @discord.ui.button(label="◀", style=discord.ButtonStyle.primary)
+    async def btn_anterior(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await self._checar_autor(interaction):
+            return
+        self.page = max(0, self.page - 1)
+        self._atualizar_botoes()
+        await interaction.response.edit_message(embed=self.embed_atual(), view=self)
+
+    @discord.ui.button(label="▶", style=discord.ButtonStyle.primary)
+    async def btn_proxima(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await self._checar_autor(interaction):
+            return
+        self.page = min(self.total_pages - 1, self.page + 1)
+        self._atualizar_botoes()
+        await interaction.response.edit_message(embed=self.embed_atual(), view=self)
+
+    @discord.ui.button(label="⏭", style=discord.ButtonStyle.secondary)
+    async def btn_ultima(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if not await self._checar_autor(interaction):
+            return
+        self.page = self.total_pages - 1
+        self._atualizar_botoes()
+        await interaction.response.edit_message(embed=self.embed_atual(), view=self)
+
+
+# ──────────────────────────────────────────────────────────────────
 #  Cog
 # ──────────────────────────────────────────────────────────────────
 
 class MalTopCog(commands.Cog):
-    """Gera o Top do Servidor combinando os tops pessoais e as médias do servidor."""
+    """Gera o Top 100 do Servidor combinando os tops pessoais e as médias do servidor."""
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
     @app_commands.command(
         name="mal_top_servidor",
-        description="Mostra o top 10 de animes do servidor com base nos tops pessoais e médias.",
+        description="Mostra o top 100 de animes do servidor (10 por página).",
     )
     async def mal_top_servidor(self, interaction: discord.Interaction):
         await interaction.response.defer()
@@ -227,7 +333,6 @@ class MalTopCog(commands.Cog):
             )
             return
 
-        # ── Coleta snapshots do banco (sem chamada à API) ─────────────
         todos_snapshots: dict[str, list[dict]] = {}
         for username in usuarios:
             snaps = carregar_snapshots_anime(username)
@@ -241,7 +346,6 @@ class MalTopCog(commands.Cog):
             )
             return
 
-        # ── Calcula o ranking ─────────────────────────────────────────
         ranking = calcular_ranking(todos_snapshots)
 
         if not ranking:
@@ -252,7 +356,6 @@ class MalTopCog(commands.Cog):
             )
             return
 
-        # ── Busca títulos na API do MAL ───────────────────────────────
         import os
         mal_client_id = os.getenv("MAL_CLIENT_ID", "")
         item_ids = [entry["item_id"] for entry in ranking]
@@ -260,75 +363,15 @@ class MalTopCog(commands.Cog):
         async with aiohttp.ClientSession() as session:
             titulos = await buscar_titulos_mal(session, item_ids, mal_client_id)
 
-        # ── Monta o embed ─────────────────────────────────────────────
-        agora = datetime.now(BRASILIA).strftime("%d/%m/%Y %H:%M")
         num_usuarios = len(todos_snapshots)
-
-        embed = discord.Embed(
-            title="🏆 Top do Servidor — MyAnimeList",
-            description=(
-                f"Ranking combinando os **favoritos do MAL** (+{PONTOS_TOP} pts cada) "
-                f"e a **média do servidor** (mín. {MIN_MEMBROS} membros).\n"
-                f"Baseado em **{num_usuarios}** usuário(s) • {agora}"
-            ),
-            color=0x2E51A2,
-        )
-        embed.set_thumbnail(
-            url="https://image.myanimelist.net/ui/OK6W_koKDTOqqqLDbIoPAiC8a86sHufn_jOI-JGtoCQ"
+        view = RankingView(
+            ranking=ranking,
+            titulos=titulos,
+            num_usuarios=num_usuarios,
+            autor_id=interaction.user.id,
         )
 
-        medalhas = ["🥇", "🥈", "🥉"]
-
-        for pos, entry in enumerate(ranking, start=1):
-            item_id = entry["item_id"]
-            info = titulos.get(item_id, {})
-            titulo = info.get("title", f"Anime #{item_id}")
-            url = f"https://myanimelist.net/anime/{item_id}"
-
-            pontos_top = entry["pontos_top"]
-            media_srv = entry["media_servidor"]
-            total = entry["pontuacao_total"]
-            membros = entry["membros_assistiram"]
-            membros_no_top = entry["membros_no_top"]
-
-            medalha = medalhas[pos - 1] if pos <= 3 else f"**#{pos}**"
-
-            # Linha de detalhes
-            detalhes_parts = []
-
-            if pontos_top > 0:
-                tops_count = pontos_top // PONTOS_TOP
-                detalhes_parts.append(f"❤️ Favorito de: **{tops_count}** membro(s) (+{pontos_top} pts)")
-
-            if media_srv > 0:
-                detalhes_parts.append(
-                    f"📊 Média servidor: **{media_srv:.2f}/10** ({membros} membros)"
-                )
-            else:
-                detalhes_parts.append(f"👥 {membros} membro(s) assistiram")
-
-            detalhes_parts.append(f"🎯 Total: **{total:.1f} pts**")
-
-            if membros_no_top:
-                nomes = ", ".join(f"`{u}`" for u in membros_no_top[:5])
-                if len(membros_no_top) > 5:
-                    nomes += f" +{len(membros_no_top) - 5}"
-                detalhes_parts.append(f"❤️ Favoritado por: {nomes}")
-
-            embed.add_field(
-                name=f"{medalha} [{titulo}]({url})",
-                value="\n".join(detalhes_parts),
-                inline=False,
-            )
-
-        embed.set_footer(
-            text=(
-                f"Top = favoritos oficiais do MAL de cada membro · "
-                f"Média = mín. {MIN_MEMBROS} membros com nota"
-            )
-        )
-
-        await interaction.followup.send(embed=embed)
+        await interaction.followup.send(embed=view.embed_atual(), view=view)
 
     @mal_top_servidor.error
     async def mal_top_servidor_error(self, interaction: discord.Interaction, error):

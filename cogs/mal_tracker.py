@@ -12,7 +12,6 @@ from discord.ext import commands, tasks
 from discord import app_commands
 from cogs.config_cog import get_config
 
-
 # ══════════════════════════════════════════════
 #  ⚙️  CONFIGURAÇÕES — edite aqui
 # ══════════════════════════════════════════════
@@ -30,6 +29,9 @@ PAUSA_PAGINACAO: float = 300.0  # 5 minutos
 
 # Qualidade de compressão JPEG para avatares (50-70 recomendado)
 QUALIDADE_AVATAR: int = 60
+
+# Intervalo mínimo entre sincronizações de favoritos (Jikan) por usuário
+COOLDOWN_FAVORITOS = timedelta(days=7)
 
 # ══════════════════════════════════════════════
 
@@ -257,6 +259,33 @@ def salvar_snapshots_em_lote(
 JIKAN_BASE = "https://api.jikan.moe/v4"
 
 
+def carregar_ultima_sync_favoritos(username: str) -> datetime | None:
+    """Retorna o timestamp (UTC) da última sincronização de favoritos, ou None se nunca rodou."""
+    with sqlite3.connect("usuarios.db") as conn:
+        c = conn.cursor()
+        c.execute(
+            "SELECT favoritos_sync_em FROM mal_usuarios_meta WHERE username = ?",
+            (username,)
+        )
+        row = c.fetchone()
+    if not row or not row[0]:
+        return None
+    try:
+        return datetime.fromisoformat(row[0])
+    except Exception:
+        return None
+
+
+def salvar_ultima_sync_favoritos(username: str, quando: datetime):
+    with sqlite3.connect("usuarios.db") as conn:
+        conn.execute(
+            "INSERT INTO mal_usuarios_meta (username, favoritos_sync_em) VALUES (?, ?) "
+            "ON CONFLICT(username) DO UPDATE SET favoritos_sync_em = excluded.favoritos_sync_em",
+            (username, quando.isoformat())
+        )
+        conn.commit()
+
+
 async def buscar_ids_favoritos_jikan(
     session: aiohttp.ClientSession, username: str
 ) -> set[str] | None:
@@ -453,18 +482,28 @@ class MalTrackerCog(commands.Cog):
 
         print(f"[MAL Tracker] ✅ Sync completo de '{username}' ({tipo}): {total} itens.")
 
-    async def _sincronizar_favoritos_usuario(self, username: str):
+    async def _sincronizar_favoritos_usuario(self, username: str, forcar: bool = False):
         """
         Consulta o Jikan e atualiza is_favorite no banco para o usuário.
+        Respeita COOLDOWN_FAVORITOS: só consulta o Jikan novamente se já tiver
+        passado o intervalo desde a última sincronização (a menos que forcar=True).
         Chamado no boot, ao adicionar um usuário e a cada ciclo do loop horário.
         Não faz nada se a resposta do Jikan indicar erro temporário (None).
         """
+        if not forcar:
+            ultima = carregar_ultima_sync_favoritos(username)
+            if ultima is not None:
+                agora = datetime.now(timezone.utc)
+                if agora - ultima < COOLDOWN_FAVORITOS:
+                    return
+
         session = await self._get_session()
         ids_favoritos = await buscar_ids_favoritos_jikan(session, username)
         if ids_favoritos is None:
-            # Erro de rede — mantém os dados anteriores intactos
+            # Erro de rede — mantém os dados anteriores intactos, não atualiza timestamp
             return
         atualizar_favoritos_db(username, ids_favoritos)
+        salvar_ultima_sync_favoritos(username, datetime.now(timezone.utc))
         print(
             f"[MAL Tracker] Favoritos de '{username}' atualizados "
             f"({len(ids_favoritos)} anime(s) marcado(s))."
@@ -475,7 +514,8 @@ class MalTrackerCog(commands.Cog):
         Dispara a sincronização completa de anime + manga para um usuário.
         Idempotente: não faz nada se o usuário já tiver snapshots.
         Usa _sync_em_andamento para evitar execuções paralelas.
-        Ao final, sincroniza também os favoritos via Jikan.
+        Ao final, sincroniza também os favoritos via Jikan (sempre, ignorando cooldown,
+        pois é a primeira sincronização do usuário).
         """
         if username in self._sync_em_andamento:
             print(f"[MAL Tracker] Sync de '{username}' já em andamento, pulando.")
@@ -489,7 +529,7 @@ class MalTrackerCog(commands.Cog):
             await self._sincronizar_lista_completa(username, "anime")
             await self._sincronizar_lista_completa(username, "manga")
             # Popula favoritos logo após o sync completo
-            await self._sincronizar_favoritos_usuario(username)
+            await self._sincronizar_favoritos_usuario(username, forcar=True)
         finally:
             self._sync_em_andamento.discard(username)
     # ──────────────────────────────────────────
@@ -920,7 +960,7 @@ class MalTrackerCog(commands.Cog):
         self._cache_mudancas_ciclo = {}
         for username in todos_usuarios:
             self._cache_mudancas_ciclo[username] = await self._detectar_mudancas_usuario(username)
-            # Atualiza favoritos via Jikan a cada ciclo
+            # Atualiza favoritos via Jikan — respeitando o cooldown semanal
             await self._sincronizar_favoritos_usuario(username)
             await asyncio.sleep(0.5)  # respeita rate limit do Jikan
 
@@ -1001,8 +1041,8 @@ class MalTrackerCog(commands.Cog):
                 ephemeral=True
             )
         else:
-            # Usuário já sincronizado — atualiza favoritos imediatamente
-            asyncio.create_task(self._sincronizar_favoritos_usuario(username))
+            # Usuário já sincronizado — atualiza favoritos imediatamente (ignora cooldown)
+            asyncio.create_task(self._sincronizar_favoritos_usuario(username, forcar=True))
             await interaction.followup.send(
                 f"✅ `{username}` adicionado ao monitoramento! Será incluído no próximo relatório.",
                 ephemeral=True
@@ -1128,6 +1168,35 @@ class MalTrackerCog(commands.Cog):
         await interaction.followup.send(
             f"✅ Relatório enviado com **{total_anime}** anime e **{total_manga}** mangá.", ephemeral=True
         )
+
+    @app_commands.command(name="mal_forcar_favoritos", description="[Admin] Força a verificação de favoritos (ignora o cooldown semanal).")
+    @app_commands.describe(username="Apenas este usuário (opcional). Se omitido, força todos os monitorados nesta guild.")
+    @app_commands.checks.has_permissions(administrator=True)
+    async def mal_forcar_favoritos(self, interaction: discord.Interaction, username: str | None = None):
+        await interaction.response.defer(ephemeral=True)
+
+        if username:
+            usuarios = carregar_usuarios(interaction.guild_id)
+            if username.lower() not in [u.lower() for u in usuarios]:
+                await interaction.followup.send(f"⚠️ `{username}` não está na lista desta guild.", ephemeral=True)
+                return
+            alvos = [username]
+        else:
+            alvos = carregar_usuarios(interaction.guild_id)
+            if not alvos:
+                await interaction.followup.send("📋 Nenhum usuário monitorado nesta guild.", ephemeral=True)
+                return
+
+        for u in alvos:
+            await self._sincronizar_favoritos_usuario(u, forcar=True)
+            await asyncio.sleep(0.5)  # respeita rate limit do Jikan
+
+        if len(alvos) == 1:
+            await interaction.followup.send(f"✅ Favoritos de `{alvos[0]}` atualizados.", ephemeral=True)
+        else:
+            await interaction.followup.send(f"✅ Favoritos de **{len(alvos)}** usuário(s) atualizados.", ephemeral=True)
+
+        print(f"[MAL Tracker] {interaction.user} forçou sync de favoritos: {', '.join(alvos)}.")
 
     @app_commands.command(name="mal_status", description="[Admin] Mostra o status atual do monitoramento MAL.")
     @app_commands.checks.has_permissions(administrator=True)

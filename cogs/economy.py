@@ -10,6 +10,45 @@ from utils.image_generator import criar_imagem_texto
 from database.db_manager import UserManager
 from cogs.config_cog import get_config
 
+# Caracteres usados nos níveis "normais" (fácil, médio, difícil)
+GERADOR_CARACTERES_BASE = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+GERADOR_CARACTERES_ESPECIAIS = "!@#$%&*()"
+GERADOR_ACENTOS = {
+    "A": "ÁÃÂÀ",
+    "E": "ÉÊÈ",
+    "I": "ÍÎÌ",
+    "O": "ÓÕÔÒ",
+    "U": "ÚÛÙ",
+}
+
+GERADOR_CHANCE_ACENTO = 0.5
+GERADOR_CHANCE_ESPECIAL = 0.2
+
+# Níveis de dificuldade do desafio:
+#   nivel       -> nome exibido no anúncio do desafio
+#   chance      -> peso relativo de sorteio (não precisa somar 1.0)
+#   tamanho     -> quantidade de caracteres do texto gerado
+#   recompensa  -> flingers ganhos ao acertar
+#   caracteres  -> "custom_acentuado" usa GERADOR_ACENTOS/ESPECIAIS, ou string com os caracteres permitidos
+GERADOR_NIVEIS = [
+    {"nivel": "fácil",      "chance": 0.50, "tamanho": 5,  "recompensa": 25,   "caracteres": GERADOR_CARACTERES_BASE},
+    {"nivel": "médio",      "chance": 0.30, "tamanho": 12, "recompensa": 50,  "caracteres": GERADOR_CARACTERES_BASE},
+    {"nivel": "difícil",    "chance": 0.15, "tamanho": 25, "recompensa": 75,  "caracteres": GERADOR_CARACTERES_BASE},
+    {"nivel": "impossível", "chance": 0.05, "tamanho": 25, "recompensa": 150, "caracteres": "custom_acentuado"},
+]
+
+# Intervalo (em segundos) entre cada rodada do gerador: (mínimo, máximo)
+GERADOR_INTERVALO_SEGUNDOS = (60 * 60, 90 * 60)
+
+# Tempo (em segundos) que os jogadores têm para responder ao desafio
+GERADOR_TEMPO_RESPOSTA_SEGUNDOS = 900
+
+# Cooldown (em horas) aplicado quando um desafio expira sem resposta
+GERADOR_COOLDOWN_EXPIRACAO_HORAS = 2
+
+# ══════════════════════════════════════════════════════════════════
+#  FIM DA CONFIGURAÇÃO DO GERADOR
+# ══════════════════════════════════════════════════════════════════
 
 # Estado do gerador por guild — evita compartilhamento entre servidores
 def _estado_padrao() -> dict:
@@ -21,7 +60,6 @@ def _estado_padrao() -> dict:
         "posted_at":   None,
         "cooldown_ate": None,
     }
-
 
 class EconomyCog(commands.Cog):
     def __init__(self, bot):
@@ -43,29 +81,18 @@ class EconomyCog(commands.Cog):
         return self.guilds_estado[guild_id]
 
     def gerar_texto_aleatorio(self):
-        base     = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
-        acentos  = {"A": "ÁÃÂÀ", "E": "ÉÊÈ", "I": "ÍÎÌ", "O": "ÓÕÔÒ", "U": "ÚÛÙ"}
-        especiais = "!@#$%&*()"
-
         def gerar_com_acentos(tamanho):
             texto = ""
             for _ in range(tamanho):
-                letra = random.choice(base)
-                if letra in acentos and random.random() < 0.5:
-                    letra = random.choice(acentos[letra])
-                elif random.random() < 0.2:
-                    letra = random.choice(especiais)
+                letra = random.choice(GERADOR_CARACTERES_BASE)
+                if letra in GERADOR_ACENTOS and random.random() < GERADOR_CHANCE_ACENTO:
+                    letra = random.choice(GERADOR_ACENTOS[letra])
+                elif random.random() < GERADOR_CHANCE_ESPECIAL:
+                    letra = random.choice(GERADOR_CARACTERES_ESPECIAIS)
                 texto += letra
             return texto
 
-        tipos = [
-            {"nivel": "fácil",      "chance": 0.50, "tamanho": 5,  "recompensa": 8,   "caracteres": base},
-            {"nivel": "médio",      "chance": 0.30, "tamanho": 12, "recompensa": 10,  "caracteres": base},
-            {"nivel": "difícil",    "chance": 0.15, "tamanho": 25, "recompensa": 25,  "caracteres": base},
-            {"nivel": "impossível", "chance": 0.05, "tamanho": 25, "recompensa": 100, "caracteres": "custom_acentuado"},
-        ]
-
-        escolha = random.choices(tipos, weights=[t["chance"] for t in tipos])[0]
+        escolha = random.choices(GERADOR_NIVEIS, weights=[t["chance"] for t in GERADOR_NIVEIS])[0]
         texto   = (
             gerar_com_acentos(escolha["tamanho"])
             if escolha["caracteres"] == "custom_acentuado"
@@ -78,10 +105,10 @@ class EconomyCog(commands.Cog):
     # ──────────────────────────────────────────
 
     async def contador_economia_loop(self):
-        """Loop principal do gerador — intervalo aleatório de 20-30 min entre cada rodada."""
+        """Loop principal do gerador — intervalo aleatório entre cada rodada."""
         await self.bot.wait_until_ready()
         while True:
-            await asyncio.sleep(random.randint(20 * 60, 30 * 60))
+            await asyncio.sleep(random.randint(*GERADOR_INTERVALO_SEGUNDOS))
 
             for guild in self.bot.guilds:
                 estado   = self._estado(guild.id)
@@ -92,7 +119,7 @@ class EconomyCog(commands.Cog):
 
                 agora = datetime.now(timezone.utc)
 
-                # Respeita cooldown de 1h se o último desafio expirou sem resposta
+                # Respeita cooldown se o último desafio expirou sem resposta
                 if estado["cooldown_ate"] and agora < estado["cooldown_ate"]:
                     continue
 
@@ -111,10 +138,12 @@ class EconomyCog(commands.Cog):
                 estado["posted_at"]   = agora
                 estado["cooldown_ate"] = None
 
+                minutos_resposta = GERADOR_TEMPO_RESPOSTA_SEGUNDOS // 60
+
                 file_image = criar_imagem_texto(texto)
                 await channel.send(
                     f"**Desafio de digitação!** (Nível: {nivel})\n"
-                    f"Digite exatamente o texto para ganhar {recompensa} flingers! Você tem **5 minutos**.\n",
+                    f"Digite exatamente o texto para ganhar {recompensa} flingers! Você tem **{minutos_resposta} minutos**.\n",
                     file=file_image
                 )
 
@@ -126,7 +155,7 @@ class EconomyCog(commands.Cog):
 
     @tasks.loop(seconds=30)
     async def verificar_expiracao_loop(self):
-        """Verifica se algum desafio ativo expirou sem resposta (5 minutos)."""
+        """Verifica se algum desafio ativo expirou sem resposta."""
         await self.bot.wait_until_ready()
         agora = datetime.now(timezone.utc)
 
@@ -135,7 +164,7 @@ class EconomyCog(commands.Cog):
                 continue
 
             decorrido = (agora - estado["posted_at"]).total_seconds()
-            if decorrido < 300:
+            if decorrido < GERADOR_TEMPO_RESPOSTA_SEGUNDOS:
                 continue
 
             # Expirou
@@ -144,15 +173,15 @@ class EconomyCog(commands.Cog):
             estado["texto"]        = None
             estado["reward"]       = 0
             estado["posted_at"]    = None
-            estado["cooldown_ate"] = agora + timedelta(hours=1)
+            estado["cooldown_ate"] = agora + timedelta(hours=GERADOR_COOLDOWN_EXPIRACAO_HORAS)
 
             if canal_id:
                 channel = self.bot.get_channel(canal_id)
                 if channel:
                     await channel.send(
-                        "⏰ Tempo esgotado! Ninguém digitou o texto. O próximo desafio será em **1 hora**."
+                        f"⏰ Tempo esgotado! Ninguém digitou o texto. O próximo desafio será em **{GERADOR_COOLDOWN_EXPIRACAO_HORAS} hora(s)**."
                     )
-            print(f"[Economy] Desafio expirado na guild {guild_id}. Próximo em 1 hora.")
+            print(f"[Economy] Desafio expirado na guild {guild_id}. Próximo em {GERADOR_COOLDOWN_EXPIRACAO_HORAS} hora(s).")
 
     # ──────────────────────────────────────────
     #  Listener
@@ -272,9 +301,11 @@ class EconomyCog(commands.Cog):
         estado["ativo"] = not estado["ativo"]
 
         if estado["ativo"]:
+            minutos_min = GERADOR_INTERVALO_SEGUNDOS[0] // 60
+            minutos_max = GERADOR_INTERVALO_SEGUNDOS[1] // 60
             await interaction.response.send_message(
                 "✅ **Gerador de texto aleatório habilitado!**\n"
-                "Um novo desafio será postado a cada 20–30 minutos.", ephemeral=True
+                f"Um novo desafio será postado a cada {minutos_min}–{minutos_max} minutos.", ephemeral=True
             )
         else:
             await interaction.response.send_message(
@@ -288,15 +319,18 @@ class EconomyCog(commands.Cog):
         estado = self._estado(interaction.guild_id)
         status = "🟢 **ATIVO**" if estado["ativo"] else "🔴 **DESABILITADO**"
 
+        minutos_min = GERADOR_INTERVALO_SEGUNDOS[0] // 60
+        minutos_max = GERADOR_INTERVALO_SEGUNDOS[1] // 60
+
         embed = discord.Embed(
             title="📊 Status do Gerador de Texto",
             color=discord.Color.green() if estado["ativo"] else discord.Color.red()
         )
         embed.add_field(name="Status",    value=status,              inline=True)
-        embed.add_field(name="Intervalo", value="A cada 20–30 minutos", inline=True)
+        embed.add_field(name="Intervalo", value=f"A cada {minutos_min}–{minutos_max} minutos", inline=True)
 
         if estado["can_win"] and estado["posted_at"]:
-            restante = 300 - int((agora - estado["posted_at"]).total_seconds())
+            restante = GERADOR_TEMPO_RESPOSTA_SEGUNDOS - int((agora - estado["posted_at"]).total_seconds())
             embed.add_field(name="Desafio ativo", value=f"⏳ Expira em {max(restante, 0)}s", inline=False)
         elif estado["cooldown_ate"] and agora < estado["cooldown_ate"]:
             restante = int((estado["cooldown_ate"] - agora).total_seconds())

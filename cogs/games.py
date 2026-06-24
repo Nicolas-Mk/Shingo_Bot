@@ -1,7 +1,7 @@
 import discord
 from discord import app_commands
 from discord.ext import commands
-from views.blackjack_view import BlackjackView
+from views.blackjack_view import BlackjackView, is_blackjack_natural
 import sqlite3
 import time
 
@@ -38,8 +38,8 @@ class GamesCog(commands.Cog):
         with sqlite3.connect("usuarios.db") as conn:
             c = conn.cursor()
             c.execute(
-            "UPDATE usuarios SET flingers = flingers - ? WHERE id = ? AND guild_id = ? AND flingers >= ?",
-            (valor, user_id, guild_id, valor)
+                "UPDATE usuarios SET flingers = flingers - ? WHERE id = ? AND guild_id = ? AND flingers >= ?",
+                (valor, user_id, guild_id, valor)
             )
             atualizado = c.rowcount
             conn.commit()
@@ -52,12 +52,75 @@ class GamesCog(commands.Cog):
 
         self.ultimo_blackjack[key] = agora
 
-        view         = BlackjackView(interaction, aposta=valor, guild_id=guild_id)
+        view = BlackjackView(interaction, aposta=valor, guild_id=guild_id)
+
+        # Resolução imediata: se qualquer lado tem blackjack natural, encerra sem mostrar botões
+        if is_blackjack_natural(view.player_hand) or is_blackjack_natural(view.dealer_hand):
+            view.finished = True
+            # dealer_jogar não é necessário — resultado já decidido pelas naturais
+            player_total   = view.calcular_pontuacao(view.player_hand)
+            dealer_total   = view.calcular_pontuacao(view.dealer_hand)
+            player_natural = is_blackjack_natural(view.player_hand)
+            dealer_natural = is_blackjack_natural(view.dealer_hand)
+
+            if player_natural and dealer_natural:
+                ganho     = valor
+                resultado = f"🤝 Ambos com blackjack natural! Empate — você recuperou {valor} flingers."
+            elif player_natural:
+                ganho     = int(valor * 2.5)
+                resultado = f"🃏 Blackjack natural! Você ganhou {ganho} flingers!"
+            else:
+                ganho     = 0
+                resultado = f"❌ Dealer tem blackjack natural! Você perdeu {valor} flingers."
+
+            if ganho > 0:
+                from views.blackjack_view import adicionar_flingers
+                adicionar_flingers(user_id, guild_id, ganho)
+
+            embed = discord.Embed(title="🃏 Blackjack Finalizado")
+            embed.add_field(
+                name="Sua mão",
+                value=f"{' | '.join(view.player_hand)}\n**Total: {player_total}**{'  🃏' if player_natural else ''}",
+                inline=True
+            )
+            embed.add_field(
+                name="Dealer",
+                value=f"{' | '.join(view.dealer_hand)}\n**Total: {dealer_total}**{'  🃏' if dealer_natural else ''}",
+                inline=True
+            )
+            embed.set_footer(text=resultado)
+
+            try:
+                await interaction.followup.send(
+                    f"🎲 Apostando **{valor} flingers**...",
+                    embed=embed,
+                )
+            except Exception as e:
+                with sqlite3.connect("usuarios.db") as conn:
+                    c = conn.cursor()
+                    c.execute(
+                        "UPDATE usuarios SET flingers = flingers + ? WHERE id = ? AND guild_id = ?",
+                        (valor, user_id, guild_id)
+                    )
+                    conn.commit()
+                self.ultimo_blackjack.pop(key, None)
+                print(f"[Blackjack] Erro ao enviar mensagem (natural), flingers devolvidos para {interaction.user}: {e}")
+            return
+
+        # Jogo normal — exibe mão inicial com botões
         player_total = view.calcular_pontuacao(view.player_hand)
 
         embed = discord.Embed(title="🃏 Blackjack")
-        embed.add_field(name="Sua mão", value=f"{' | '.join(view.player_hand)}\n**Total: {player_total}**", inline=True)
-        embed.add_field(name="Dealer",  value=f"{view.dealer_hand[0]} | ❓\n*({len(view.dealer_hand)} cartas)*", inline=True)
+        embed.add_field(
+            name="Sua mão",
+            value=f"{' | '.join(view.player_hand)}\n**Total: {player_total}**",
+            inline=True
+        )
+        embed.add_field(
+            name="Dealer",
+            value=f"{view.dealer_hand[0]} | ❓\n*({len(view.dealer_hand)} cartas)*",
+            inline=True
+        )
 
         try:
             await interaction.followup.send(
@@ -69,8 +132,8 @@ class GamesCog(commands.Cog):
             with sqlite3.connect("usuarios.db") as conn:
                 c = conn.cursor()
                 c.execute(
-                "UPDATE usuarios SET flingers = flingers + ? WHERE id = ? AND guild_id = ?",
-                (valor, user_id, guild_id)
+                    "UPDATE usuarios SET flingers = flingers + ? WHERE id = ? AND guild_id = ?",
+                    (valor, user_id, guild_id)
                 )
                 conn.commit()
             self.ultimo_blackjack.pop(key, None)

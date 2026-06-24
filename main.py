@@ -15,6 +15,8 @@ from cogs.mal_tracker import MalTrackerCog
 from cogs.loja import LojaCog
 from cogs.mal_lookup import MalLookupCog
 from cogs.mal_top import MalTopCog
+from cogs.markov_cog import MarkovCog
+from cogs.insult_cog import InsultCog
 
 
 
@@ -42,6 +44,8 @@ class CustomBot(commands.Bot):
         await self.add_cog(MalLookupCog(self))
         await self.add_cog(MalTopCog(self))
         await self.add_cog(LojaCog(self))
+        await self.add_cog(MarkovCog(self))
+        await self.add_cog(InsultCog(self))
 
         synced = await self.tree.sync()
         print(f"✅ {len(synced)} comandos sincronizados.")

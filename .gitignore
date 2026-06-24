@@ -52,3 +52,6 @@ migrations/__pycache__/V009__criar_tabela_snapshots.cpython-313.pyc
 migrations/__pycache__/V010__corrigir_pk_mal_snapshots.cpython-313.pyc
 cogs/__pycache__/mal_top.cpython-313.pyc
 migrations/__pycache__/V011__adicionar_favoritos_mal_snapshots.cpython-313.pyc
+cogs/__pycache__/
+migrations/__pycache__/V012__adicionar_guild_id_mensagens.cpython-313.pyc
+migrations/__pycache__/
