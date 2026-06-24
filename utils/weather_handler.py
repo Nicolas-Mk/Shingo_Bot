@@ -16,19 +16,27 @@ async def _geocode(
     session: aiohttp.ClientSession,
     cidade: str,
     estado: str | None,
+    pais: str | None,
     api_key: str,
 ) -> tuple[float, float, str, str] | None:
     """
     Usa a Geocoding API da OpenWeatherMap para resolver cidade → (lat, lon).
 
-    Quando `estado` é informado, busca até 10 resultados e filtra pelo
-    campo `state` retornado pela API, aceitando tanto sigla (SC) quanto
-    nome completo (Santa Catarina), sem distinção de acentos/maiúsculas.
+    Monta a query progressivamente com cidade, estado (opcional) e país
+    (opcional; padrão BR). Quando `estado` é informado, busca até 10
+    resultados e filtra pelo campo `state` retornado pela API, aceitando
+    tanto sigla (SC) quanto nome completo (Santa Catarina), sem distinção
+    de acentos/maiúsculas.
 
     Retorna (lat, lon, nome_cidade, nome_estado) ou None se não encontrar.
     """
+    partes = [cidade]
+    if estado:
+        partes.append(estado)
+    partes.append(pais.upper() if pais else "BR")
+
     params = {
-        "q": f"{cidade},BR",   # limita ao Brasil; remova ",BR" para busca global
+        "q": ",".join(partes),
         "limit": 10,
         "appid": api_key,
     }
@@ -57,17 +65,18 @@ async def _geocode(
     return None
 
 
-async def get_weather(cidade: str, estado: str | None = None):
+async def get_weather(cidade: str, estado: str | None = None, pais: str | None = None):
     """
-    Busca informações de clima para uma cidade, com filtro opcional de estado.
+    Busca informações de clima para uma cidade, com filtro opcional de estado e país.
 
     Fluxo:
-      1. Geocoding API → resolve cidade+estado para lat/lon dentro do Brasil.
+      1. Geocoding API → resolve cidade+estado+país para lat/lon.
       2. Weather API   → busca clima pelas coordenadas (sem ambiguidade de país).
 
     Args:
         cidade (str): Nome da cidade.
-        estado (str | None): Estado/UF para desambiguar (ex: "SC", "Santa Catarina").
+        estado (str | None): Estado/UF para desambiguar (ex: "SC", "NY", "Santa Catarina").
+        pais (str | None): Código do país em inglês (ex: "BR", "US", "JP"). Padrão: "BR".
 
     Returns:
         tuple: (discord.Embed, None) em caso de sucesso, (None, str) em caso de erro.
@@ -81,18 +90,20 @@ async def get_weather(cidade: str, estado: str | None = None):
         async with aiohttp.ClientSession() as session:
 
             # ── Etapa 1: Geocoding ────────────────────────────────────
-            geo = await _geocode(session, cidade, estado, api_key)
+            geo = await _geocode(session, cidade, estado, pais, api_key)
 
             if geo is None:
-                if estado:
+                if estado or pais:
+                    detalhes = " / ".join(filter(None, [estado, (pais or "BR").upper()]))
                     return None, (
-                        f'Não encontrei **{cidade}** no estado **{estado}**. '
-                        f'Verifique o nome da cidade e do estado e tente novamente.'
+                        f'Não encontrei **{cidade}** ({detalhes}). '
+                        f'Verifique o nome da cidade, estado e país e tente novamente.'
                     )
                 else:
                     return None, (
                         f'Cidade **{cidade}** não encontrada. '
-                        f'Tente incluir o estado (ex: `/clima Laguna SC`).'
+                        f'Tente incluir o estado e/ou país.\n'
+                        f'💡 Ex: `/clima "Nova Iorque" NY US` ou `/clima Tokyo JP`'
                     )
 
             lat, lon, nome_cidade, nome_estado = geo
@@ -118,13 +129,13 @@ async def get_weather(cidade: str, estado: str | None = None):
                 umidade  = data["main"]["humidity"]
                 desc     = data["weather"][0]["description"].capitalize()
                 vento    = data["wind"]["speed"]
-                pais     = data["sys"]["country"]
+                pais_ret = data["sys"]["country"]
 
                 # Título mostra estado se disponível
                 if nome_estado:
-                    titulo = f"🌤️ Clima em {nome_cidade} — {nome_estado}, {pais}"
+                    titulo = f"🌤️ Clima em {nome_cidade} — {nome_estado}, {pais_ret}"
                 else:
-                    titulo = f"🌤️ Clima em {nome_cidade}, {pais}"
+                    titulo = f"🌤️ Clima em {nome_cidade}, {pais_ret}"
 
                 embed = discord.Embed(
                     title=titulo,
