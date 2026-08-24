@@ -31,7 +31,6 @@ def carregar_todos_usuarios() -> list[str]:
         rows = conn.execute("SELECT DISTINCT username FROM mal_usuarios").fetchall()
     return [r[0] for r in rows]
 
-
 def atualizar_favoritos_db(username: str, ids_favoritos: set[str]):
     """
     Atualiza is_favorite para todos os animes do usuário no banco:

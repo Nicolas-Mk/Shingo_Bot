@@ -89,20 +89,21 @@ RESPOSTAS_NIVEL_2 = [
 ]
 
 RESPOSTAS_NIVEL_3 = [
-    "PARA LOGO, seu {insult} miserável! Vai tomar banho!",
-    "Tô de saco cheio de você, seu {insult} do inferno!",
-    "Pode ir embora, seu {insult} insuportável! Ninguém te quer aqui!",
-    "Qual é a sua? Me respeita, seu {insult} lazarento!",
+    "Tu é puta rapaz, seu {insult} desgraçado!",
+    "Vai dar meia hora de bunda com o relógio parado, seu {insult}!",
+    "Sua existência é desperdício de oxigênio, seu {insult} insuportável! Ninguém te quer aqui!",
+    "Qual é a sua? Me respeita, seu {insult}!",
     "Sai daqui, seu {insult} de quinta categoria! Vai incomodar outro!",
-    "Me xinga de novo e vou banir você pessoalmente, seu {insult} maldito!",
-    "Você não vale nem a energia que gastei respondendo, seu {insult} ordinário!",
-    "Que falta de respeito! Vai à merda você também, seu {insult} sem noção!",
+    "Me xinga de novo e vou banir você da existência, seu {insult} maldito!",
+    "Você não vale nem a energia que gastei respondendo, seu {insult}!",
+    "Tu é fã do Ig0y porra! Não me dirige a palavra, seu {insult}!",
+    "Vem pra porrada então! Tu tem 60kg molhado, {insult} do caralho!"
 ]
 
 INSULTOS_RETORNO = {
     1: ["trouxa", "bobo", "panaca", "lerdo", "tapado", "paspalho", "pamonha"],
     2: ["canalha", "pilantra", "safado", "miserável", "vagabundo", "lazarento"],
-    3: ["arrombado", "sem-vergonha", "mal-educado", "desgraçado", "insuportável", "escroto", "saco de bosta"],
+    3: ["arrombado", "cu de prego", "resto de aborto", "desgraçado", "insuportável", "escroto", "saco de bosta", "larper"],
 }
 
 

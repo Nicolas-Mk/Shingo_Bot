@@ -3,11 +3,28 @@ from discord.ext import commands
 import sqlite3
 from datetime import datetime
 
+from cogs.config_cog import get_config, modulo_ativo
+
+# Chave de configuração usada com /config_canal para definir onde os avisos
+# de level up (ganho por XP de call) são enviados. Se não configurado,
+# cai no system_channel da guild (comportamento anterior).
+CONFIG_CANAL_LEVELUP = "canal_levelup"
+
 
 class VoiceXPCog(commands.Cog):
     def __init__(self, bot):
         self.bot          = bot
         self.call_entradas = {}
+
+    def _canal_levelup(self, guild: discord.Guild) -> discord.TextChannel | None:
+        """Resolve o canal de aviso de level up: configurado > system_channel > None."""
+        canal_id = get_config(guild.id, CONFIG_CANAL_LEVELUP)
+        if canal_id:
+            canal = guild.get_channel(canal_id)
+            if isinstance(canal, discord.TextChannel):
+                return canal
+            print(f"[VoiceXP] ⚠️  Canal {canal_id} configurado em '{CONFIG_CANAL_LEVELUP}' não encontrado na guild {guild.name}; usando system_channel.")
+        return guild.system_channel
 
     @commands.Cog.listener()
     async def on_voice_state_update(self, member, before, after):
@@ -41,38 +58,43 @@ class VoiceXPCog(commands.Cog):
 
                 if minutos_validos >= 15:
                     xp_ganho = int(minutos_validos // 15) * 3
+
                     with sqlite3.connect('usuarios.db') as conn:
                         c = conn.cursor()
-                    c.execute(
-                        "SELECT xp, nivel FROM usuarios WHERE id = ? AND guild_id = ?",
-                        (member.id, member.guild.id)
-                    )
-                    row = c.fetchone()
+                        c.execute(
+                            "SELECT xp, nivel FROM usuarios WHERE id = ? AND guild_id = ?",
+                            (member.id, member.guild.id)
+                        )
+                        row = c.fetchone()
 
-                    if row:
-                        xp_atual, nivel = row
-                        novo_xp         = xp_atual + xp_ganho
+                        if row:
+                            xp_atual, nivel = row
+                            novo_xp         = xp_atual + xp_ganho
 
-                        xp_necessario = 50 * (1.1 ** (nivel - 1))
-                        dificuldade   = 1 + (nivel // 10) * 0.05
-
-                        while novo_xp >= xp_necessario * dificuldade:
-                            novo_xp      -= int(xp_necessario * dificuldade)
-                            nivel        += 1
                             xp_necessario = 50 * (1.1 ** (nivel - 1))
                             dificuldade   = 1 + (nivel // 10) * 0.05
 
-                            if member.guild.system_channel:
-                                await member.guild.system_channel.send(
-                                    f"🎉 Parabéns, {member.mention}, você subiu para o nível {nivel} de fracasso! 💀"
-                                )
+                            canal_levelup = None  # resolvido só se realmente subir de nível
 
-                        c.execute(
-                            "UPDATE usuarios SET xp = ?, nivel = ? WHERE id = ? AND guild_id = ?",
-                            (int(novo_xp), nivel, member.id, member.guild.id)
-                        )
-                        conn.commit()
+                            while novo_xp >= xp_necessario * dificuldade:
+                                novo_xp      -= int(xp_necessario * dificuldade)
+                                nivel        += 1
+                                xp_necessario = 50 * (1.1 ** (nivel - 1))
+                                dificuldade   = 1 + (nivel // 10) * 0.05
 
+                                if canal_levelup is None:
+                                    canal_levelup = self._canal_levelup(member.guild)
+
+                                if canal_levelup and modulo_ativo(member.guild.id, "levelup"):
+                                    await canal_levelup.send(
+                                        f"🎉 Parabéns, {member.mention}, você subiu para o nível {nivel} de fracasso! 💀"
+                                    )
+
+                            c.execute(
+                                "UPDATE usuarios SET xp = ?, nivel = ? WHERE id = ? AND guild_id = ?",
+                                (int(novo_xp), nivel, member.id, member.guild.id)
+                            )
+                            conn.commit()
 
         # Mudou estado de mute dentro da call
         elif before.channel is not None and after.channel is not None:

@@ -1,4 +1,3 @@
-# python
 import os
 import re
 import random
@@ -16,7 +15,7 @@ from PIL import Image, ImageEnhance
 import aiohttp
 from utils.giphy_handler import get_giphy_gif
 from utils.weather_handler import get_weather
-from cogs.config_cog import get_config
+from cogs.config_cog import get_config, modulo_ativo
 from database.db_manager import UserManager
 
 RECEBA_EMOJI_ID   = 1385739583861428345
@@ -27,6 +26,10 @@ ASSET_IMAGE_PATH  = os.path.join("assets", "cuidado.png")
 PEOPLE_THRESHOLD  = 6        # notifica quando a call atinge esse número
 CHANNEL_COOLDOWN_MIN = 60    # cooldown por canal de voz (minutos)
 USUARIO_OBRIGATORIO = 275940282405617665  # deve estar na call para o aviso ser enviado
+
+ANIME24H_USER_ID     = 226508036129161217
+ANIME24H_TRIGGERS    = {"anime 24h", "animes 24h", "série d dos assuntos"}
+ANIME24H_IMAGE_PATH  = os.path.join("assets", "animes24h.png")
 
 
 class UtilityCog(commands.Cog):
@@ -43,7 +46,7 @@ class UtilityCog(commands.Cog):
     def converter_x_para_fixup(self, texto: str) -> str:
         return re.sub(
             r"https?://(www\.)?(x\.com|twitter\.com)/",
-            "https://fixupx.com/",
+            "https://vxtwitter.com/",
             texto,
             flags=re.IGNORECASE
         )
@@ -63,6 +66,9 @@ class UtilityCog(commands.Cog):
 
     async def _maybe_send_image_for_full_call(self, channel: discord.VoiceChannel):
         """Notifica o canal de texto configurado quando uma call enche."""
+        if not modulo_ativo(channel.guild.id, "call_cheia"):
+            return
+
         canal_id = get_config(channel.guild.id, "canal_call")
         if not canal_id:
             return
@@ -144,12 +150,39 @@ class UtilityCog(commands.Cog):
             return
 
         conteudo = message.content.lower()
+
+        if message.author.id == ANIME24H_USER_ID and conteudo in ANIME24H_TRIGGERS:
+            await self.responder_anime24h(message)
+            return
+
         if "bom dia" in conteudo:
             await self.responder_cumprimento(message.author, message.channel, "bomdia")
         elif "boa tarde" in conteudo:
             await self.responder_cumprimento(message.author, message.channel, "boatarde")
         elif "boa noite" in conteudo:
             await self.responder_cumprimento(message.author, message.channel, "boanoite")
+
+    async def responder_anime24h(self, message: discord.Message):
+        try:
+            embed = discord.Embed(
+                title="📺 VAI SE FUDER",
+                description=f"{message.author.mention} ai pq não sei oq não sei oq lá, senta num cacete rapá!",
+                color=discord.Color.orange()
+            )
+
+            if os.path.isfile(ANIME24H_IMAGE_PATH):
+                embed.set_image(url="attachment://animes24h.png")
+                await message.channel.send(
+                    embed=embed,
+                    file=discord.File(ANIME24H_IMAGE_PATH, filename="animes24h.png")
+                )
+            else:
+                embed.set_footer(text="(imagem não encontrada)")
+                await message.channel.send(embed=embed)
+        except discord.Forbidden:
+            print("[WARN] Sem permissão para enviar mensagem/imagem de animes 24h.")
+        except Exception as e:
+            print(f"[ERRO] Falha ao responder animes 24h: {e}")
 
     async def responder_cumprimento(self, user, canal, tipo_comando):
         hora  = datetime.now().hour

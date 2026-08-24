@@ -13,6 +13,7 @@ from discord import app_commands
 #    canal_call       — onde o bot avisa quando uma call enche
 #    canal_mal        — onde o bot posta relatórios do MAL
 #    canal_anonimo    — onde o bot expõe o autor de mensagens anônimas
+#    canal_levelup    — onde o bot avisa quando alguém sobe de nível (XP de call)
 # ──────────────────────────────────────────────────────────────────
 
 CANAIS_VALIDOS = {
@@ -20,7 +21,39 @@ CANAIS_VALIDOS = {
     "canal_call":     "Aviso de call cheia",
     "canal_mal":      "Relatórios do MAL Tracker",
     "canal_anonimo":  "Exposição de mensagens anônimas",
+    "canal_levelup":  "Aviso de level up (XP de call)",
 }
+
+# ──────────────────────────────────────────────────────────────────
+#  Módulos que podem ser ativados/desativados por servidor.
+#  Chave usada no guild_config: "modulo_<modulo>_ativo" (1 = ligado, 0 = desligado).
+#  Por padrão (sem registro no banco) todo módulo é considerado ATIVO.
+# ──────────────────────────────────────────────────────────────────
+
+MODULOS_VALIDOS = {
+    "markov":     "Frases automáticas por Cadeia de Markov (/markov)",
+    "mal_mensal": "Relatório mensal de atividade no MAL",
+    "call_cheia": "Aviso de call cheia",
+    "levelup":    "Mensagens de level up no chat",
+    "gerador":    "Gerador de texto aleatório (desafio de digitação)",
+}
+
+
+def _chave_modulo(modulo: str) -> str:
+    return f"modulo_{modulo}_ativo"
+
+
+def modulo_ativo(guild_id: int, modulo: str) -> bool:
+    """
+    Retorna True se o módulo estiver ativado neste servidor.
+    Sem configuração explícita, o módulo é considerado ativado (padrão).
+    """
+    valor = get_config(guild_id, _chave_modulo(modulo))
+    return True if valor is None else bool(valor)
+
+
+def set_modulo_ativo(guild_id: int, modulo: str, ativo: bool):
+    set_config(guild_id, _chave_modulo(modulo), 1 if ativo else 0)
 
 
 def criar_tabela_config():
@@ -124,6 +157,59 @@ class ConfigCog(commands.Cog):
             embed.add_field(name=descricao, value=valor, inline=False)
 
         embed.set_footer(text="Use /config_canal para definir cada canal.")
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @app_commands.command(
+        name="modulo",
+        description="[Admin] Ativa ou desativa uma parte do bot neste servidor."
+    )
+    @app_commands.describe(
+        modulo="Qual parte do bot configurar",
+        estado="Ativar ou desativar"
+    )
+    @app_commands.choices(
+        modulo=[
+            app_commands.Choice(name=descricao, value=chave)
+            for chave, descricao in MODULOS_VALIDOS.items()
+        ],
+        estado=[
+            app_commands.Choice(name="Ativar",    value="on"),
+            app_commands.Choice(name="Desativar", value="off"),
+        ],
+    )
+    @app_commands.checks.has_permissions(administrator=True)
+    async def modulo(
+        self,
+        interaction: discord.Interaction,
+        modulo: str,
+        estado: str,
+    ):
+        ativo = estado == "on"
+        set_modulo_ativo(interaction.guild_id, modulo, ativo)
+        descricao = MODULOS_VALIDOS.get(modulo, modulo)
+        status = "✅ **ativado**" if ativo else "🚫 **desativado**"
+        await interaction.response.send_message(
+            f"{status}: {descricao}",
+            ephemeral=True
+        )
+        print(f"[Config] Guild {interaction.guild_id}: módulo '{modulo}' = {'ativo' if ativo else 'inativo'} (por {interaction.user})")
+
+    @app_commands.command(
+        name="modulo_status",
+        description="[Admin] Mostra quais partes do bot estão ativadas neste servidor."
+    )
+    @app_commands.checks.has_permissions(administrator=True)
+    async def modulo_status(self, interaction: discord.Interaction):
+        embed = discord.Embed(
+            title="🧩 Módulos do Bot",
+            color=0x2E51A2
+        )
+        for chave, descricao in MODULOS_VALIDOS.items():
+            ativo = modulo_ativo(interaction.guild_id, chave)
+            valor = "✅ Ativado" if ativo else "🚫 Desativado"
+            embed.add_field(name=descricao, value=valor, inline=False)
+
+        embed.set_footer(text="Use /modulo para ativar ou desativar.")
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
 

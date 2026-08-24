@@ -19,6 +19,8 @@ import discord
 from discord.ext import commands
 from discord import app_commands
 
+from cogs.config_cog import modulo_ativo
+
 
 # ──────────────────────────────────────────────────────────────────
 #  CONFIGURAÇÕES
@@ -29,7 +31,9 @@ TRIGGER_CHANCE     = 0.01   # 4% de chance por mensagem de o bot falar sozinho
 MIN_MSGS_TREINO    = 100    # Mínimo de mensagens antes de gerar frases
 MAX_PALAVRAS       = 30     # Tamanho máximo da frase gerada
 MIN_PALAVRAS       = 5      # Tamanho mínimo aceitável
-HISTORICO_LIMITE   = 100000   # Mensagens do banco carregadas na inicialização
+HISTORICO_LIMITE   = 3000   # Mensagens do banco carregadas na inicialização
+                             # (reduzido de 100k p/ manter o modelo mais "afiado"
+                             #  com o vocabulário/estilo recente do servidor)
 TENTATIVAS_GERACAO = 5      # Quantas vezes tenta gerar antes de desistir
 INICIO_ALEATORIO_CHANCE = 0.4   # 40% das vezes começa por um bigrama aleatório
                                 # em vez do token __INICIO__ (mais variedade)
@@ -240,12 +244,22 @@ class MarkovCog(commands.Cog):
     async def on_message(self, message: discord.Message):
         if not message.guild or message.author.bot:
             return
+        if not modulo_ativo(message.guild.id, "markov"):
+            return
         if message.content.startswith(("/", "!", "?")):
             return
 
         modelo = self._modelo(message.guild.id)
         modelo.treinar(message.content)
         self._salvar(message)
+
+        # Mantém o modelo em memória alinhado ao limite de histórico:
+        # ao ultrapassar o limite, reconstrói a partir do banco (últimas N mensagens)
+        if modelo.total_treinadas > HISTORICO_LIMITE:
+            modelo_novo = ModeloMarkov(ordem=ORDEM)
+            self._carregar_historico(message.guild.id, modelo_novo)
+            self._modelos[message.guild.id] = modelo_novo
+            modelo = modelo_novo
 
         if modelo.total_treinadas < MIN_MSGS_TREINO:
             return
@@ -258,6 +272,11 @@ class MarkovCog(commands.Cog):
 
     @app_commands.command(name="markov", description="Gera uma frase aleatoria com base no historico do chat")
     async def markov_cmd(self, interaction: discord.Interaction):
+        if not modulo_ativo(interaction.guild_id, "markov"):
+            await interaction.response.send_message(
+                "🚫 O módulo Markov está desativado neste servidor.", ephemeral=True
+            )
+            return
         modelo = self._modelo(interaction.guild_id)
         if modelo.total_treinadas < MIN_MSGS_TREINO:
             await interaction.response.send_message(
@@ -275,6 +294,11 @@ class MarkovCog(commands.Cog):
 
     @app_commands.command(name="markov_stats", description="Estatisticas do modelo Markov deste servidor")
     async def markov_stats(self, interaction: discord.Interaction):
+        if not modulo_ativo(interaction.guild_id, "markov"):
+            await interaction.response.send_message(
+                "🚫 O módulo Markov está desativado neste servidor.", ephemeral=True
+            )
+            return
         modelo = self._modelo(interaction.guild_id)
         embed = discord.Embed(title="Markov — Estatisticas", color=discord.Color.purple())
         embed.add_field(name="Mensagens aprendidas", value=f"{modelo.total_treinadas:,}",    inline=True)
@@ -283,6 +307,7 @@ class MarkovCog(commands.Cog):
         embed.add_field(name="Ordem da cadeia",      value=str(modelo.ordem),                inline=True)
         embed.add_field(name="Chance de falar",      value=f"{TRIGGER_CHANCE * 100:.1f}%",   inline=True)
         embed.add_field(name="Min. para ativar",     value=str(MIN_MSGS_TREINO),             inline=True)
+        embed.add_field(name="Limite de historico",  value=f"{HISTORICO_LIMITE:,}",          inline=True)
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @app_commands.command(
@@ -300,6 +325,11 @@ class MarkovCog(commands.Cog):
         canal: discord.TextChannel | None = None,
         limite: int = 500,
     ):
+        if not modulo_ativo(interaction.guild_id, "markov"):
+            await interaction.response.send_message(
+                "🚫 O módulo Markov está desativado neste servidor.", ephemeral=True
+            )
+            return
         await interaction.response.defer(ephemeral=True)
 
         canal   = canal or interaction.channel

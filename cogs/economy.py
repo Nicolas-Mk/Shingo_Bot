@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 from collections import defaultdict
 from utils.image_generator import criar_imagem_texto
 from database.db_manager import UserManager
-from cogs.config_cog import get_config
+from cogs.config_cog import get_config, modulo_ativo
 
 # Caracteres usados nos níveis "normais" (fácil, médio, difícil)
 GERADOR_CARACTERES_BASE = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
@@ -51,9 +51,9 @@ GERADOR_COOLDOWN_EXPIRACAO_HORAS = 2
 # ══════════════════════════════════════════════════════════════════
 
 # Estado do gerador por guild — evita compartilhamento entre servidores
+# (o liga/desliga em si é controlado pelo módulo "gerador" via /modulo)
 def _estado_padrao() -> dict:
     return {
-        "ativo":       True,
         "can_win":     False,
         "texto":       None,
         "reward":      0,
@@ -114,7 +114,7 @@ class EconomyCog(commands.Cog):
                 estado   = self._estado(guild.id)
                 canal_id = get_config(guild.id, "canal_economia")
 
-                if not canal_id or not estado["ativo"]:
+                if not canal_id or not modulo_ativo(guild.id, "gerador"):
                     continue
 
                 agora = datetime.now(timezone.utc)
@@ -289,42 +289,19 @@ class EconomyCog(commands.Cog):
                 f"🛠️ {interaction.user.mention}, você trabalhou duro e ganhou **{ganho} flingers!**"
             )
 
-    @app_commands.command(name="gerador", description="Habilita ou desabilita o gerador de texto aleatório")
-    async def toggle_gerador(self, interaction: discord.Interaction):
-        if not interaction.user.guild_permissions.administrator:
-            await interaction.response.send_message(
-                "❌ Você precisa ter permissão de administrador para usar este comando!", ephemeral=True
-            )
-            return
-
-        estado = self._estado(interaction.guild_id)
-        estado["ativo"] = not estado["ativo"]
-
-        if estado["ativo"]:
-            minutos_min = GERADOR_INTERVALO_SEGUNDOS[0] // 60
-            minutos_max = GERADOR_INTERVALO_SEGUNDOS[1] // 60
-            await interaction.response.send_message(
-                "✅ **Gerador de texto aleatório habilitado!**\n"
-                f"Um novo desafio será postado a cada {minutos_min}–{minutos_max} minutos.", ephemeral=True
-            )
-        else:
-            await interaction.response.send_message(
-                "⏸️ **Gerador de texto aleatório desabilitado!**\n"
-                "Use o comando novamente para reativar.", ephemeral=True
-            )
-
     @app_commands.command(name="status_gerador", description="Mostra o status atual do gerador de texto")
     async def status_gerador(self, interaction: discord.Interaction):
         agora  = datetime.now(timezone.utc)
         estado = self._estado(interaction.guild_id)
-        status = "🟢 **ATIVO**" if estado["ativo"] else "🔴 **DESABILITADO**"
+        ativo  = modulo_ativo(interaction.guild_id, "gerador")
+        status = "🟢 **ATIVO**" if ativo else "🔴 **DESABILITADO**"
 
         minutos_min = GERADOR_INTERVALO_SEGUNDOS[0] // 60
         minutos_max = GERADOR_INTERVALO_SEGUNDOS[1] // 60
 
         embed = discord.Embed(
             title="📊 Status do Gerador de Texto",
-            color=discord.Color.green() if estado["ativo"] else discord.Color.red()
+            color=discord.Color.green() if ativo else discord.Color.red()
         )
         embed.add_field(name="Status",    value=status,              inline=True)
         embed.add_field(name="Intervalo", value=f"A cada {minutos_min}–{minutos_max} minutos", inline=True)
@@ -338,6 +315,7 @@ class EconomyCog(commands.Cog):
             segundos = restante % 60
             embed.add_field(name="Cooldown ativo", value=f"⏳ Próximo desafio em {minutos}m{segundos}s", inline=False)
 
+        embed.set_footer(text="Use /modulo para ativar ou desativar.")
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
