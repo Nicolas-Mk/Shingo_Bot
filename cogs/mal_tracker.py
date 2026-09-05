@@ -86,6 +86,86 @@ ROTULOS_MANGA = {
 COR_ANIME = (99, 155, 255)   # azul
 COR_MANGA = (255, 130, 130)  # vermelho/rosa
 
+# Borda do card de evento do Shingo: uma versão escurecida de COR_MANGA (em
+# vez do vermelho vivo original), pra manter a identidade visual do mangá
+# sem competir com a atenção que deve ir pra imagem em si.
+COR_SHINGO_BORDA = tuple(int(c * 0.45) for c in COR_ANIME)  # (114, 58, 58)
+
+# ──────────────────────────────────────────────
+#  Easter egg — "Watashi wa Shingo"
+# ──────────────────────────────────────────────
+#
+# ID do mangá "Watashi wa Shingo" no MyAnimeList — usado para disparar a
+# reação especial do bot quando alguém completa a obra, em homenagem ao
+# nome do próprio bot.
+SHINGO_MANGA_ID = "24646"
+
+SHINGO_IMAGENS = {
+    "baixa":          os.path.join("assets", "shingo 3-.jpg"),
+    "media":          os.path.join("assets", "shingo 4-6.jpg"),
+    "neutra":         os.path.join("assets", "shingo 7.jpg"),
+    "elogio":         os.path.join("assets", "shingo 8-9.jpg"),
+    "transcendencia": os.path.join("assets", "shingo 10.jpg"),
+}
+
+
+def _shingo_reacao(nota: int) -> tuple[str, str, str]:
+    """
+    Retorna (chave_imagem, titulo_embed, texto_com_{nota}) de acordo com a
+    nota dada pelo usuário ao completar 'Watashi wa Shingo' (MAL id 24646).
+    """
+    # Sem emoji nos títulos de propósito: eles vão desenhados dentro do PNG
+    # do card (mesma fonte DejaVu usada em gerar_imagem_cabecalho), que não
+    # tem glifos de emoji — apareceria como retângulo vazio ("tofu").
+    if nota <= 3:
+        return (
+            "baixa",
+            "SHINGO NÃO GOSTOU DISSO",
+            "Nota {nota}/10 Shingo te despreza. Pense bem antes de me subestimar."
+        )
+    elif nota <= 6:
+        return (
+            "media",
+            "SHINGO ERGUE UMA SOBRANCELHA",
+            "Nota {nota}/10... Shingo espera mais de você. Tente novamente."
+        )
+    elif nota == 7:
+        return (
+            "neutra",
+            "SHINGO APROVA, COM MODERAÇÃO",
+            "Nota {nota}/10 Shingo reconhece o esforço. É um começo razoável."
+        )
+    elif nota <= 9:
+        return (
+            "elogio",
+            "SHINGO ESTÁ IMPRESSIONADO",
+            "Nota {nota}/10! Shingo reconhece sua sabedoria e o seu bom gosto."
+        )
+    else:  # 10
+        return (
+            "transcendencia",
+            "VOCÊ TRANSCENDEU",
+            "Nota 10/10. Você não apenas leu — você entendeu. Shingo vê em você um igual."
+        )
+
+_SHINGO_IMG_CACHE: dict[str, bytes | None] = {}
+
+def _carregar_imagem_shingo(chave: str) -> bytes | None:
+    """Lê a imagem correspondente de assets/ uma única vez e mantém em cache em memória."""
+    if chave not in _SHINGO_IMG_CACHE:
+        caminho = SHINGO_IMAGENS[chave]
+        if os.path.isfile(caminho):
+            try:
+                with open(caminho, "rb") as f:
+                    _SHINGO_IMG_CACHE[chave] = f.read()
+            except Exception as e:
+                print(f"[MAL Tracker] ⚠️  Não foi possível carregar '{caminho}': {e}")
+                _SHINGO_IMG_CACHE[chave] = None
+        else:
+            print(f"[MAL Tracker] ⚠️  Imagem do Shingo '{caminho}' não encontrada.")
+            _SHINGO_IMG_CACHE[chave] = None
+    return _SHINGO_IMG_CACHE[chave]
+
 
 # ──────────────────────────────────────────────
 #  Persistência — usuários
@@ -575,6 +655,24 @@ _PAD       = 16
 # AniList (80 x 115.97) — retrato, mais alta que larga.
 _COVER_RATIO = 80 / 115.97
 
+# Proporção original das imagens do easter egg do Shingo (2133x1530 px),
+# usada em gerar_imagem_shingo para redimensionar sem distorcer.
+_RAZAO_SHINGO = 2133 / 1530
+
+# Altura-alvo do CARD INTEIRO do easter egg do Shingo (título + subtítulo +
+# texto + imagem + padding) — não da imagem isolada. Escolhida pra ficar no
+# mesmo patamar dos outros cards do mal_tracker (um card de atualização com
+# 2 itens sai com ~474px de altura; o cabeçalho, ~320px). Isso é o que
+# importa de verdade: o Discord limita a altura de exibição de cada anexo, e
+# quando a altura passa desse teto a largura visual encolhe proporcionalmente
+# — foi o que causou o card do Shingo aparecer mais estreito que os outros
+# mesmo com a mesma largura em pixels. A imagem em si é dimensionada para
+# preencher o espaço que sobra depois do texto, então cards com mensagens
+# mais curtas (1 linha) acabam com uma imagem um pouco maior que os com
+# mensagens mais longas (2 linhas) — mas a altura TOTAL do card se mantém
+# igual em qualquer caso.
+_ALVO_ALTURA_CARD_SHINGO = 460
+
 # Fator de supersampling: tudo é desenhado nesta escala e depois reduzido
 # com LANCZOS, o que elimina o serrilhado em círculos, bordas arredondadas e texto.
 _SS = 3
@@ -871,6 +969,127 @@ def gerar_imagem_cabecalho(
     return _finalizar_canvas(canvas)
 
 
+def _quebrar_texto(draw: ImageDraw.ImageDraw, texto: str, fonte: ImageFont.FreeTypeFont, largura_max: int) -> list[str]:
+    """Quebra `texto` em várias linhas que cabem em `largura_max`, por palavra inteira."""
+    palavras = texto.split()
+    linhas: list[str] = []
+    atual = ""
+    for palavra in palavras:
+        teste = f"{atual} {palavra}".strip()
+        if draw.textlength(teste, font=fonte) <= largura_max:
+            atual = teste
+        else:
+            if atual:
+                linhas.append(atual)
+            atual = palavra
+    if atual:
+        linhas.append(atual)
+    return linhas
+
+
+def gerar_imagem_shingo_texto(
+    usuario: str,
+    nota: int,
+    titulo: str,
+    texto: str,
+) -> bytes:
+    """
+    Card com a parte textual da reação do Shingo (título + subtítulo +
+    texto), no mesmo estilo visual dos outros cards (fundo escuro, cantos
+    arredondados). Altura ajustada só ao conteúdo — sem imagem, então fica
+    naturalmente curto e não corre risco de esbarrar no teto de altura que
+    o Discord usa pra escalar anexos.
+
+    Mandado como a PRIMEIRA de duas mensagens (ver gerar_imagem_shingo_arte
+    para a segunda) — separar texto e arte em cards distintos evita que um
+    dispute espaço vertical com o outro, então a arte pode ocupar uma altura
+    bem maior sem estourar a altura total segura que mantém a largura de
+    exibição igual à dos outros cards do mal_tracker.
+    """
+    s = _SS
+    pad, card_w = _PAD * s, _CARD_W * s
+
+    f_titulo = _fonte(30 * s, negrito=True)
+    f_sub    = _fonte(19 * s)
+    f_texto  = _fonte(21 * s)
+
+    medidor = ImageDraw.Draw(Image.new("RGB", (card_w, 10)))
+
+    subtitulo = f"@{usuario}  ·  Watashi wa Shingo  ·  Nota {nota}/10"
+    largura_texto_max = card_w - pad * 4
+    linhas_texto = _quebrar_texto(medidor, texto, f_texto, largura_texto_max)
+
+    titulo_y = pad + 10 * s
+    sub_y    = titulo_y + 42 * s
+    texto_y  = sub_y + 36 * s
+    linha_h  = 30 * s
+    altura   = texto_y + len(linhas_texto) * linha_h + pad
+
+    canvas = Image.new("RGB", (card_w, altura), _BG)
+    draw = ImageDraw.Draw(canvas)
+    draw.rounded_rectangle((0, 0, card_w - 1, altura - 1), radius=14 * s, fill=_CARD_BG)
+
+    titulo_w = draw.textlength(titulo, font=f_titulo)
+    draw.text(((card_w - titulo_w) // 2, titulo_y), titulo, font=f_titulo, fill=(255, 255, 255))
+
+    sub_w = draw.textlength(subtitulo, font=f_sub)
+    draw.text(((card_w - sub_w) // 2, sub_y), subtitulo, font=f_sub, fill=_TEXT_MUTED)
+
+    y_linha = texto_y
+    for linha in linhas_texto:
+        linha_w = draw.textlength(linha, font=f_texto)
+        draw.text(((card_w - linha_w) // 2, y_linha), linha, font=f_texto, fill=_TEXT_MAIN)
+        y_linha += linha_h
+
+    return _finalizar_canvas(canvas)
+
+
+def gerar_imagem_shingo_arte(
+    imagem_bytes: bytes | None,
+    cor_destaque: tuple[int, int, int] = COR_SHINGO_BORDA,
+) -> bytes:
+    """
+    Card com só a arte do Shingo (shingo X.jpg), no mesmo estilo visual dos
+    outros cards — fundo escuro, cantos arredondados, imagem centralizada
+    com borda colorida. Mandado como a SEGUNDA mensagem, depois do card de
+    texto (gerar_imagem_shingo_texto).
+
+    Como não compete por espaço com título/subtítulo/texto, a imagem pode
+    usar quase toda a altura-alvo do card (_ALVO_ALTURA_CARD_SHINGO) pra si,
+    ficando bem maior que na versão anterior (card único) — mantendo a
+    proporção original (2133x1530 ≈ 1.394:1) sem distorcer.
+    """
+    s = _SS
+    pad, card_w = _PAD * s, _CARD_W * s
+
+    altura_total_alvo = _ALVO_ALTURA_CARD_SHINGO * s
+    altura_minima = 160 * s
+    altura_img = max(altura_minima, altura_total_alvo - pad * 2)
+    largura_img = int(altura_img * _RAZAO_SHINGO)
+    largura_max_disponivel = card_w - pad * 2
+    if largura_img > largura_max_disponivel:
+        largura_img = largura_max_disponivel
+        altura_img = int(largura_img / _RAZAO_SHINGO)
+
+    altura = altura_img + pad * 2
+
+    canvas = Image.new("RGB", (card_w, altura), _BG)
+    draw = ImageDraw.Draw(canvas)
+    draw.rounded_rectangle((0, 0, card_w - 1, altura - 1), radius=14 * s, fill=_CARD_BG)
+
+    icone_img = _abrir_imagem(imagem_bytes, _placeholder_avatar())
+    icone = ImageOps.fit(icone_img, (largura_img, altura_img))
+    icone_x = (card_w - largura_img) // 2
+    icone_y = pad
+    canvas.paste(icone, (icone_x, icone_y), _mascara_arredondada((largura_img, altura_img), 16 * s))
+    draw.rounded_rectangle(
+        (icone_x, icone_y, icone_x + largura_img, icone_y + altura_img),
+        radius=16 * s, outline=cor_destaque, width=3 * s
+    )
+
+    return _finalizar_canvas(canvas)
+
+
 # ──────────────────────────────────────────────
 #  Cog principal
 # ──────────────────────────────────────────────
@@ -888,6 +1107,11 @@ class MalTrackerCog(commands.Cog):
         # Populado UMA VEZ por usuário antes de processar qualquer guild,
         # para que guilds múltiplas recebam exatamente o mesmo conjunto de mudanças.
         self._cache_mudancas_ciclo: dict[str, dict[str, list[dict]]] = {}
+        # Cache de eventos especiais do Shingo detectados no ciclo atual:
+        # { username: [nota1, nota2, ...] } — normalmente terá no máximo 1 nota,
+        # mas fica como lista para suportar o caso raro de reset + reconclusão
+        # do mangá no mesmo ciclo.
+        self._cache_eventos_shingo: dict[str, list[int]] = {}
         self.monitorar_loop.start()
         self.favoritos_semanal_loop.start()
 
@@ -931,6 +1155,13 @@ class MalTrackerCog(commands.Cog):
             "sort":   "list_updated_at",
             "limit":  limite,
             "offset": offset,
+            # Sem isso, a API omite silenciosamente da resposta qualquer item
+            # marcado como nsfw=gray ou nsfw=black — mesmo títulos só PG-13/R+
+            # (ex: Apocalypse Hotel, Lycoris Recoil, Sayonara Lara, Prison
+            # School, Kanashimi no Belladonna). O item nunca aparece em
+            # nenhuma página, pra nenhum usuário, e nunca entra em
+            # mal_snapshots — confirmado via debug manual em 2026-09.
+            "nsfw": "true",
         }
         try:
             async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=30)) as resp:
@@ -1001,6 +1232,82 @@ class MalTrackerCog(commands.Cog):
             await asyncio.sleep(PAUSA_PAGINACAO)
 
         print(f"[MAL Tracker] ✅ Sync completo de '{username}' ({tipo}): {total} itens.")
+
+    async def _backfill_nsfw_usuario(self, username: str) -> tuple[int, int]:
+        """
+        Sincronização adicional, sob demanda, pra preencher no banco os itens
+        NSFW (nsfw=gray/black) que a API omitia da lista ANTES da correção do
+        parâmetro nsfw=true em _buscar_lista (confirmado em 2026-09 com títulos
+        como Apocalypse Hotel, Lycoris Recoil, Sayonara Lara, Prison School e
+        Kanashimi no Belladonna).
+
+        Só insere itens que AINDA NÃO estão em mal_snapshots — não sobrescreve
+        nada já sincronizado, e não refaz a sincronização completa inteira.
+        Usuários novos daqui pra frente já recebem esses itens automaticamente
+        via _sincronizar_lista_completa normal (que já usa nsfw=true agora),
+        então este backfill só é necessário pra quem já tinha snapshots ANTES
+        da correção.
+
+        Itens preenchidos aqui entram como BASELINE (igual sync inicial): não
+        disparam relatório retroativo de atualizações antigas — só passam a
+        ser comparados/rastreados a partir do próximo loop horário.
+
+        Retorna (novos_anime, novos_manga).
+        """
+        if username in self._sync_em_andamento:
+            print(f"[MAL Tracker] '{username}' já em sync, pulando backfill NSFW.")
+            return (0, 0)
+
+        self._sync_em_andamento.add(username)
+        resultado = {"anime": 0, "manga": 0}
+        try:
+            for tipo in ("anime", "manga"):
+                snaps_existentes = carregar_snapshots(username, tipo)
+                offset = 0
+
+                while True:
+                    pagina = await self._buscar_lista(username, tipo, limite=LIMITE_PAGINA, offset=offset)
+                    if pagina is None:
+                        print(f"[MAL Tracker] ⚠️  Backfill NSFW de '{username}' ({tipo}) interrompido no offset={offset}.")
+                        break
+                    if not pagina:
+                        break
+
+                    faltantes = [item for item in pagina if str(item["node"]["id"]) not in snaps_existentes]
+                    if faltantes:
+                        upserts = [
+                            (
+                                str(item["node"]["id"]),
+                                self._snapshot(item["list_status"], tipo),
+                                item["list_status"].get("updated_at", ""),
+                            )
+                            for item in faltantes
+                        ]
+                        salvar_snapshots_em_lote(username, tipo, upserts)
+
+                        upserts_progresso = [
+                            (str(item["node"]["id"]), "", "", 0, 0, 0, 0) for item in faltantes
+                        ]
+                        salvar_progresso_mensal_em_lote(username, tipo, upserts_progresso)
+
+                        resultado[tipo] += len(faltantes)
+                        for item in faltantes:
+                            print(
+                                f"[MAL Tracker]    [{username}] Backfill NSFW: "
+                                f"'{item['node']['title']}' ({tipo}/{item['node']['id']}) adicionado como baseline."
+                            )
+
+                    offset += len(pagina)
+                    if len(pagina) < LIMITE_PAGINA:
+                        break
+
+                    await asyncio.sleep(PAUSA_PAGINACAO)
+
+                print(f"[MAL Tracker] ✅ Backfill NSFW de '{username}' ({tipo}): {resultado[tipo]} item(ns) novo(s).")
+        finally:
+            self._sync_em_andamento.discard(username)
+
+        return (resultado["anime"], resultado["manga"])
 
     async def _sincronizar_favoritos_usuario(self, username: str, forcar: bool = False):
         """
@@ -1219,7 +1526,7 @@ class MalTrackerCog(commands.Cog):
         status_permitidos: list[str],              # filtros já resolvidos pela guild
         primeira_vez: bool = False,                # True = usuário sem snapshots ainda
         username: str = "",                        # apenas para contexto nos logs
-    ) -> tuple[list[dict], list[tuple[str, str, str]], list[tuple[str, str, str, int, int, int, int]]]:
+    ) -> tuple[list[dict], list[tuple[str, str, str]], list[tuple[str, str, str, int, int, int, int]], list[int]]:
         """
         Compara itens da API contra snapshots do banco.
 
@@ -1227,10 +1534,13 @@ class MalTrackerCog(commands.Cog):
           - mudanças detectadas (para o relatório desta guild)
           - upserts de mal_snapshots a persistir
           - upserts de mal_progresso_mensal a persistir
+          - notas que dispararam o easter egg do Shingo neste lote (normalmente
+            0 ou 1 elemento; só populado quando tipo == "manga")
         """
         novas:             list[dict]                 = []
         upserts:            list[tuple[str, str, str]] = []
         upserts_progresso:  list[tuple[str, str, str, int, int, int, int]] = []
+        eventos_shingo:      list[int]                 = []
 
         for item in itens:
             item_id    = str(item["node"]["id"])
@@ -1272,6 +1582,13 @@ class MalTrackerCog(commands.Cog):
                     registro_progresso_anterior, ep_atual, cap_atual, vol_atual, completou_agora, updated_at
                 )
                 upserts_progresso.append((item_id, watched_at, mes_ref, ep_mes, cap_mes, vol_mes, comp_mes))
+
+                # Nota: itens "novos" pro banco (primeira vez que aparecem nos 50
+                # mais recentes) não disparam o evento do Shingo — não temos
+                # como confirmar que a transição pra "completed" aconteceu
+                # agora e não há muito tempo atrás, então preferimos não arriscar
+                # um falso disparo. O evento só dispara na comparação de
+                # snapshot anterior x atual, mais abaixo.
 
                 if not updated_at:
                     print(f"[MAL Tracker] [{username}] '{titulo}' ({tipo}/{item_id}) é novo na lista mas sem updated_at — não reportado.")
@@ -1331,6 +1648,22 @@ class MalTrackerCog(commands.Cog):
                 delta_vol = atu.get("num_volumes_read", 0) - ant.get("num_volumes_read", 0)
             completou_agora = atu.get("status") == "completed" and ant.get("status") != "completed"
 
+            # 🎉 Easter egg do Shingo: só dispara na transição REAL pra
+            # "completed" de Watashi wa Shingo (id 24646), com base na
+            # comparação snapshot anterior x atual — evita falso positivo em
+            # itens "novos" pro banco (onde não sabemos o estado real
+            # anterior) e em relidas/mudanças de nota sem trocar status.
+            # Roda independente dos filtros de status da guild (assim como o
+            # progresso mensal): é uma reação do bot ao evento em si, não uma
+            # notificação de atualização de lista.
+            if tipo == "manga" and item_id == SHINGO_MANGA_ID and completou_agora:
+                nota_shingo = atu.get("score") or 0
+                if nota_shingo > 0:
+                    eventos_shingo.append(nota_shingo)
+                    print(f"[MAL Tracker] [{username}] 🎉 Evento Shingo disparado! nota={nota_shingo}")
+                else:
+                    print(f"[MAL Tracker] [{username}] 📖 completou Watashi wa Shingo sem nota — evento Shingo não disparado (aguardando nota).")
+
             watched_at, mes_ref, ep_mes, cap_mes, vol_mes, comp_mes = self._atualizar_progresso_mensal(
                 registro_progresso_anterior, delta_ep, delta_cap, delta_vol, completou_agora, updated_at
             )
@@ -1353,7 +1686,7 @@ class MalTrackerCog(commands.Cog):
                     f"mas está fora dos status permitidos nesta checagem — NÃO reportado (snapshot atualizado no banco)."
                 )
 
-        return novas, upserts, upserts_progresso
+        return novas, upserts, upserts_progresso, eventos_shingo
 
     def _montar_entrada(
         self,
@@ -1390,18 +1723,22 @@ class MalTrackerCog(commands.Cog):
 
     async def _detectar_mudancas_usuario(
         self, username: str
-    ) -> dict[str, list[dict]]:
+    ) -> tuple[dict[str, list[dict]], list[int]]:
         """
         Busca os itens recentes de um usuário, compara com os snapshots do banco
-        e persiste as atualizações. Retorna as mudanças brutas (sem filtro de guild)
-        para que cada guild aplique seus próprios filtros depois.
+        e persiste as atualizações. Retorna (mudanças brutas, eventos_shingo):
+          - mudanças brutas, sem filtro de guild, para que cada guild aplique
+            seus próprios filtros depois;
+          - notas que dispararam o easter egg do Shingo neste ciclo (lista de
+            inteiros, normalmente vazia ou com um único elemento).
 
         Chamado UMA VEZ por usuário por ciclo — garante que todas as guilds
-        recebem o mesmo conjunto de mudanças antes de qualquer snapshot ser atualizado.
+        recebem o mesmo conjunto de mudanças/eventos antes de qualquer snapshot
+        ser atualizado.
         """
         if username in self._sync_em_andamento:
             print(f"[MAL Tracker] '{username}' em sync inicial, pulando loop horário.")
-            return {}
+            return {}, []
 
         snaps_anime = carregar_snapshots(username, "anime")
         snaps_manga = carregar_snapshots(username, "manga")
@@ -1420,10 +1757,10 @@ class MalTrackerCog(commands.Cog):
         # por guild depois em _filtrar_mudancas_para_guild.
         todos_status = TODOS_STATUS_ANIME + TODOS_STATUS_MANGA
 
-        novas_anime, upserts_anime, upserts_progresso_anime = self._processar_itens(
+        novas_anime, upserts_anime, upserts_progresso_anime, _ = self._processar_itens(
             itens_anime or [], snaps_anime, progresso_anime, "anime", todos_status, username=username
         )
-        novas_manga, upserts_manga, upserts_progresso_manga = self._processar_itens(
+        novas_manga, upserts_manga, upserts_progresso_manga, eventos_shingo = self._processar_itens(
             itens_manga or [], snaps_manga, progresso_manga, "manga", todos_status, username=username
         )
 
@@ -1442,7 +1779,7 @@ class MalTrackerCog(commands.Cog):
         if total:
             print(f"[MAL Tracker] '{username}': {len(novas_anime)} anime, {len(novas_manga)} mangá detectados.")
 
-        return {"anime": novas_anime, "manga": novas_manga}
+        return {"anime": novas_anime, "manga": novas_manga}, eventos_shingo
 
     def _filtrar_mudancas_para_guild(
         self,
@@ -1650,6 +1987,51 @@ class MalTrackerCog(commands.Cog):
 
         return total_itens
 
+    async def _enviar_evento_shingo(self, canal: discord.TextChannel, usuario: str, nota: int):
+        """
+        Envia a reação especial do Shingo quando alguém completa 'Watashi wa
+        Shingo' (MAL id 24646), como DUAS mensagens em sequência — mesmo
+        esquema visual do resto do mal_tracker (PNGs gerados com Pillow,
+        anexo puro, sem embed):
+
+          1. Card de texto (título + subtítulo + reação do Shingo).
+          2. Card com a arte (shingo X.jpg) em tamanho maior.
+
+        Separar texto e arte evita que um dispute altura com o outro — a
+        arte pode ocupar uma altura bem maior sem estourar o teto que o
+        Discord usa pra escalar anexos (o que, quando os dois dividiam um
+        único card, deixava a imagem menor pra caber o texto).
+        """
+        chave, titulo, texto_modelo = _shingo_reacao(nota)
+        img_bytes = _carregar_imagem_shingo(chave)
+        texto = texto_modelo.format(nota=nota)
+
+        try:
+            png_texto = gerar_imagem_shingo_texto(usuario, nota, titulo, texto)
+            png_arte  = gerar_imagem_shingo_arte(img_bytes)
+        except Exception as e:
+            print(f"[MAL Tracker] ❌ Erro ao gerar imagens do evento Shingo de '{usuario}': {e}")
+            traceback.print_exc()
+            return
+
+        buffer_texto = BytesIO(png_texto)
+        buffer_texto.seek(0)
+        try:
+            await canal.send(file=discord.File(buffer_texto, filename=f"shingo_texto_{usuario}.png"))
+        except Exception as e:
+            print(f"[MAL Tracker] ❌ Erro ao enviar card de texto do evento Shingo de '{usuario}': {e}")
+            traceback.print_exc()
+
+        await asyncio.sleep(0.3)
+
+        buffer_arte = BytesIO(png_arte)
+        buffer_arte.seek(0)
+        try:
+            await canal.send(file=discord.File(buffer_arte, filename=f"shingo_arte_{usuario}.png"))
+        except Exception as e:
+            print(f"[MAL Tracker] ❌ Erro ao enviar card de arte do evento Shingo de '{usuario}': {e}")
+            traceback.print_exc()
+
     # ──────────────────────────────────────────
     #  Loop principal
     # ──────────────────────────────────────────
@@ -1672,13 +2054,17 @@ class MalTrackerCog(commands.Cog):
         # "sumindo" do relatório sem nenhum erro visível.
         todos_usuarios = carregar_todos_usuarios()
         self._cache_mudancas_ciclo = {}
+        self._cache_eventos_shingo = {}
         for username in todos_usuarios:
             try:
-                self._cache_mudancas_ciclo[username] = await self._detectar_mudancas_usuario(username)
+                mudancas, eventos = await self._detectar_mudancas_usuario(username)
+                self._cache_mudancas_ciclo[username] = mudancas
+                self._cache_eventos_shingo[username]  = eventos
             except Exception as e:
                 print(f"[MAL Tracker] ❌ Erro ao detectar mudanças de '{username}' — usuário pulado neste ciclo: {e}")
                 traceback.print_exc()
                 self._cache_mudancas_ciclo[username] = {}
+                self._cache_eventos_shingo[username]  = []
 
             # Favoritos NÃO são mais sincronizados aqui — isso rodava a cada
             # ciclo horário pra TODOS os usuários (o cooldown individual só
@@ -1696,20 +2082,27 @@ class MalTrackerCog(commands.Cog):
                     print(f"[MAL Tracker] Guild '{guild.name}': canal_mal não configurado, pulando.")
                     return
 
-                mudancas = await self._coletar_mudancas(guild.id)
-                if not mudancas:
-                    print(f"[MAL Tracker] Guild '{guild.name}': nenhuma atualização.")
-                    return
-
                 canal = self.bot.get_channel(canal_id)
                 if canal is None:
                     print(f"[MAL Tracker] ⚠️  Canal {canal_id} não encontrado na guild {guild.name}.")
                     return
 
-                await self._enviar_relatorio(canal, mudancas)
-                total_anime = sum(len(v["anime"]) for v in mudancas.values())
-                total_manga = sum(len(v["manga"]) for v in mudancas.values())
-                print(f"[MAL Tracker] ✅ {guild.name}: {total_anime} anime, {total_manga} mangá — {len(mudancas)} usuário(s).")
+                mudancas = await self._coletar_mudancas(guild.id)
+                if mudancas:
+                    await self._enviar_relatorio(canal, mudancas)
+                    total_anime = sum(len(v["anime"]) for v in mudancas.values())
+                    total_manga = sum(len(v["manga"]) for v in mudancas.values())
+                    print(f"[MAL Tracker] ✅ {guild.name}: {total_anime} anime, {total_manga} mangá — {len(mudancas)} usuário(s).")
+                else:
+                    print(f"[MAL Tracker] Guild '{guild.name}': nenhuma atualização.")
+
+                # Eventos especiais do Shingo — disparam independente dos
+                # filtros de status da guild, em todo servidor onde o usuário
+                # completado estiver monitorado.
+                for usuario in carregar_usuarios(guild.id):
+                    for nota in self._cache_eventos_shingo.get(usuario, []):
+                        await self._enviar_evento_shingo(canal, usuario, nota)
+                        await asyncio.sleep(0.3)
             except Exception as e:
                 print(f"[MAL Tracker] ❌ Erro ao processar guild '{guild.name}': {e}")
                 traceback.print_exc()
@@ -2058,6 +2451,45 @@ class MalTrackerCog(commands.Cog):
             await interaction.followup.send(f"✅ Favoritos de **{len(alvos)}** usuário(s) atualizados.", ephemeral=True)
 
         print(f"[MAL Tracker] {interaction.user} forçou sync de favoritos: {', '.join(alvos)}.")
+
+    @app_commands.command(
+        name="mal_sincronizar_nsfw",
+        description="[Admin] Preenche no banco itens NSFW que a API omitia antes da correção (rodar uma vez)."
+    )
+    @app_commands.describe(
+        username="Apenas este usuário (opcional). Se omitido, roda para todos os monitorados nesta guild."
+    )
+    @app_commands.checks.has_permissions()
+    async def mal_sincronizar_nsfw(self, interaction: discord.Interaction, username: str | None = None):
+        await interaction.response.defer(ephemeral=True)
+
+        if username:
+            usuarios_alvo = carregar_usuarios(interaction.guild_id)
+            username_real = next((u for u in usuarios_alvo if u.lower() == username.lower()), None)
+            if username_real is None:
+                await interaction.followup.send(f"⚠️ `{username}` não está na lista desta guild.", ephemeral=True)
+                return
+            alvos = [username_real]
+        else:
+            alvos = carregar_usuarios(interaction.guild_id)
+            if not alvos:
+                await interaction.followup.send("📋 Nenhum usuário monitorado nesta guild.", ephemeral=True)
+                return
+
+        await interaction.followup.send(
+            f"🔄 Iniciando backfill NSFW em segundo plano para **{len(alvos)}** usuário(s). "
+            f"Cada usuário pode levar de minutos a horas, dependendo do tamanho da lista "
+            f"(paginação respeita o rate limit do MAL). Acompanhe pelo console/log.",
+            ephemeral=True
+        )
+
+        async def rodar_todos():
+            for u in alvos:
+                novos_anime, novos_manga = await self._backfill_nsfw_usuario(u)
+                print(f"[MAL Tracker] Backfill NSFW de '{u}' concluído: {novos_anime} anime, {novos_manga} mangá.")
+
+        asyncio.create_task(rodar_todos())
+        print(f"[MAL Tracker] {interaction.user} disparou backfill NSFW para: {', '.join(alvos)}.")
 
     @app_commands.command(name="mal_status", description="[Admin] Mostra o status atual do monitoramento MAL.")
     @app_commands.checks.has_permissions(administrator=True)

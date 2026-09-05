@@ -5,6 +5,7 @@ import sqlite3
 import time
 import datetime
 from database.db_manager import UserManager
+from cogs.config_cog import modulo_ativo
 
 
 class UserProfileCog(commands.Cog):
@@ -88,8 +89,11 @@ class UserProfileCog(commands.Cog):
         )
 
         if upou:
+            ping_ativo = modulo_ativo(message.guild.id, "levelup_ping")
+            referencia = message.author.mention if ping_ativo else f"**{message.author.display_name}**"
+
             await message.channel.send(
-                f"🎉 Parabéns, {message.author.mention}, você subiu para o nível {nivel} de fracasso! 💀"
+                f"🎉 Parabéns, {referencia}, você subiu para o nível {nivel} de fracasso! 💀"
             )
 
     @app_commands.command(name="perfil", description="Ver seu perfil de registro")

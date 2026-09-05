@@ -14,10 +14,11 @@ from cogs.utility import UtilityCog
 from cogs.mal_tracker import MalTrackerCog
 from cogs.loja import LojaCog
 from cogs.mal_lookup import MalLookupCog
-from cogs.mal_top import MalTopCog
 from cogs.markov_cog import MarkovCog
 from cogs.insult_cog import InsultCog
 from cogs.mal_mensal import MalMensalCog
+from cogs.mal_top_anime import MalTopCog
+from cogs.mal_top_manga import MalTopMangaCog
 
 load_dotenv()
 TOKEN = os.getenv('DISCORD_TOKEN')
@@ -46,6 +47,7 @@ class CustomBot(commands.Bot):
         await self.add_cog(MarkovCog(self))
         await self.add_cog(InsultCog(self))
         await self.add_cog(MalMensalCog(self))
+        await self.add_cog(MalTopMangaCog(self))
 
         synced = await self.tree.sync()
         print(f"✅ {len(synced)} comandos sincronizados.")

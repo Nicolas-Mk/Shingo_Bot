@@ -13,7 +13,7 @@ from cogs.config_cog import get_config
 MAL_API_BASE = "https://api.myanimelist.net/v2"
 BRASILIA = timezone(timedelta(hours=-3))
 
-PONTOS_TOP = 0.5         # pontos por aparecer nos favoritos do MAL de um membro
+PONTOS_TOP = 0.2         # pontos por aparecer nos favoritos do MAL de um membro
 MIN_MEMBROS = 5         # mínimo de membros que assistiram p/ entrar na média
 TOP_SERVIDOR_SIZE = 50  # quantos animes compõem o ranking total
 PAGE_SIZE = 10           # itens exibidos por página
@@ -72,15 +72,12 @@ def calcular_ranking(todos_snapshots: dict[str, list[dict]]) -> list[dict]:
         return acumulado[item_id]
 
     for username, snaps in todos_snapshots.items():
-        top_ids = {s["item_id"] for s in snaps if s.get("is_favorite")}
+        completos = [s for s in snaps if s.get("status") == "completed"]
+        top_ids = {s["item_id"] for s in completos if s.get("is_favorite")}
 
-        for snap in snaps:
+        for snap in completos:
             item_id = snap["item_id"]
             score = snap.get("score", 0)
-            status = snap.get("status", "")
-
-            if status not in ("completed", "watching", "on_hold", "dropped") and score == 0:
-                continue
 
             entrada = get_or_create(item_id)
             entrada["membros_assistiram"] += 1
@@ -113,22 +110,69 @@ def calcular_ranking(todos_snapshots: dict[str, list[dict]]) -> list[dict]:
 #  Busca títulos na API do MAL
 # ──────────────────────────────────────────────────────────────────
 
+ANILIST_API = "https://graphql.anilist.co"
+
+_ANILIST_QUERY = """
+query ($idMal: Int, $type: MediaType) {
+  Media(idMal: $idMal, type: $type) {
+    title { romaji english }
+    coverImage { medium large }
+  }
+}
+"""
+
+
+async def buscar_titulo_anilist(
+    session: aiohttp.ClientSession,
+    item_id: str,
+    tipo: str,  # "ANIME" ou "MANGA"
+) -> dict | None:
+    """Fallback via AniList (usa o próprio id do MAL através do campo idMal)."""
+    try:
+        async with session.post(
+            ANILIST_API,
+            json={
+                "query": _ANILIST_QUERY,
+                "variables": {"idMal": int(item_id), "type": tipo},
+            },
+            timeout=aiohttp.ClientTimeout(total=10),
+        ) as resp:
+            if resp.status != 200:
+                return None
+            data = await resp.json()
+            media = (data or {}).get("data", {}).get("Media")
+            if not media:
+                return None
+            titulo = media.get("title", {})
+            capa = media.get("coverImage", {})
+            return {
+                "title": titulo.get("english") or titulo.get("romaji"),
+                "image_url": capa.get("medium") or capa.get("large"),
+            }
+    except Exception:
+        return None
+
+
 async def buscar_titulos_mal(
     session: aiohttp.ClientSession,
     item_ids: list[str],
     mal_client_id: str,
 ) -> dict[str, dict]:
     import os
+    import logging
+    logger = logging.getLogger(__name__)
+
     headers = {"X-MAL-CLIENT-ID": mal_client_id or os.getenv("MAL_CLIENT_ID", "")}
     titulos = {}
 
     async def fetch_one(item_id: str):
         url = f"{MAL_API_BASE}/anime/{item_id}"
         params = {"fields": "title,main_picture"}
+
         try:
             async with session.get(
                 url, params=params, headers=headers,
-                timeout=aiohttp.ClientTimeout(total=10)
+                timeout=aiohttp.ClientTimeout(total=8)
             ) as resp:
                 if resp.status == 200:
                     data = await resp.json()
@@ -139,17 +183,38 @@ async def buscar_titulos_mal(
                             or data.get("main_picture", {}).get("large")
                         ),
                     }
-                else:
-                    titulos[item_id] = {"title": f"Anime #{item_id}", "image_url": None}
-        except Exception:
-            titulos[item_id] = {"title": f"Anime #{item_id}", "image_url": None}
+                    return
 
-    sem = asyncio.Semaphore(5)
+                logger.warning(
+                    "MAL API retornou status %s ao buscar anime %s, tentando AniList",
+                    resp.status, item_id,
+                )
+
+        except (aiohttp.ClientError, asyncio.TimeoutError) as e:
+            logger.warning(
+                "Timeout/erro de rede ao buscar anime %s na MAL, tentando AniList: %s",
+                item_id, e,
+            )
+
+        # MAL falhou (timeout, rate limit, erro não recuperável etc.):
+        # tenta o AniList direto, sem ficar reinsistindo na MAL
+        info = await buscar_titulo_anilist(session, item_id, "ANIME")
+        if info and info.get("title"):
+            titulos[item_id] = info
+            return
+
+        logger.warning(
+            "Falha ao buscar anime %s tanto na MAL quanto no AniList, usando placeholder",
+            item_id,
+        )
+        titulos[item_id] = {"title": f"Anime #{item_id}", "image_url": None}
+
+    sem = asyncio.Semaphore(3)
 
     async def fetch_with_sem(item_id):
         async with sem:
             await fetch_one(item_id)
-            await asyncio.sleep(0.3)
+            await asyncio.sleep(0.5)
 
     await asyncio.gather(*[fetch_with_sem(iid) for iid in item_ids])
     return titulos
@@ -311,14 +376,14 @@ class RankingView(discord.ui.View):
 # ──────────────────────────────────────────────────────────────────
 
 class MalTopCog(commands.Cog):
-    """Gera o Top 100 do Servidor combinando os tops pessoais e as médias do servidor."""
+    """Gera o Top do Servidor combinando os tops pessoais e as médias do servidor."""
 
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
     @app_commands.command(
         name="mal_top_servidor",
-        description="Mostra o top 100 de animes do servidor (10 por página).",
+        description="Mostra o top de animes do servidor (10 por página).",
     )
     async def mal_top_servidor(self, interaction: discord.Interaction):
         await interaction.response.defer()
@@ -351,7 +416,7 @@ class MalTopCog(commands.Cog):
         if not ranking:
             await interaction.followup.send(
                 "📊 Dados insuficientes para gerar o ranking. "
-                "É preciso que os membros tenham animes com notas em suas listas.",
+                "É preciso que os membros tenham animes completos com notas em suas listas.",
                 ephemeral=True,
             )
             return

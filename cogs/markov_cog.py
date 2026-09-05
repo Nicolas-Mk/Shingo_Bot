@@ -7,6 +7,17 @@ Melhorias v2:
   - Anti-loop: detecta e interrompe ciclos na geração
   - Geração por início aleatório (não só do token INICIO)
   - Novo comando /markov_treinar para importar histórico do Discord via API
+
+Melhorias v3:
+  - Rastreamento de origem: cada transição do modelo agora sabe de qual
+    mensagem original ela veio.
+  - Anti-colagem-única: a geração não pode "andar" mais que N tokens
+    seguidos dentro da mesma mensagem de origem — ao atingir o limite,
+    é forçada a pular para uma transição vinda de outra fonte.
+  - Colagem mínima obrigatória: frases com mais de LIMIAR_PALAVRAS_COLAGEM
+    palavras só são aceitas se tiverem contribuição de pelo menos
+    MIN_FONTES_COLAGEM mensagens diferentes (evita reproduzir quase
+    verbatim uma única frase de um usuário).
 """
 
 import re
@@ -27,16 +38,25 @@ from cogs.config_cog import modulo_ativo
 # ──────────────────────────────────────────────────────────────────
 
 ORDEM              = 2      # 2 = mais criativo / 3 = mais coerente
-TRIGGER_CHANCE     = 0.01   # 4% de chance por mensagem de o bot falar sozinho
+TRIGGER_CHANCE     = 0.01   # 1% de chance por mensagem de o bot falar sozinho
 MIN_MSGS_TREINO    = 100    # Mínimo de mensagens antes de gerar frases
 MAX_PALAVRAS       = 30     # Tamanho máximo da frase gerada
 MIN_PALAVRAS       = 5      # Tamanho mínimo aceitável
 HISTORICO_LIMITE   = 3000   # Mensagens do banco carregadas na inicialização
                              # (reduzido de 100k p/ manter o modelo mais "afiado"
                              #  com o vocabulário/estilo recente do servidor)
-TENTATIVAS_GERACAO = 5      # Quantas vezes tenta gerar antes de desistir
+TENTATIVAS_GERACAO = 6      # Quantas vezes tenta gerar antes de desistir
 INICIO_ALEATORIO_CHANCE = 0.4   # 40% das vezes começa por um bigrama aleatório
                                 # em vez do token __INICIO__ (mais variedade)
+
+# ── Anti-colagem-única (v3.1: parar em vez de forçar salto) ─────
+# Em vez de forçar uma troca de fonte no meio da frase (o que gerava
+# saltos de assunto sem sentido), a cadeia sempre escolhe a transição
+# mais natural. Só interrompemos a geração se ela ficar "colada" demais
+# numa ÚNICA mensagem de origem — sinal de que está reproduzindo aquela
+# frase quase inteira. Isso encurta a frase em vez de deformá-la.
+MAX_TRECHO_MESMA_FONTE = 7   # nº máx. de palavras seguidas vindas da mesma
+                              # mensagem de origem antes de parar a geração
 
 _INICIO = "__INICIO__"
 _FIM    = "__FIM__"
@@ -57,16 +77,28 @@ _RE_PONTUACAO = re.compile(r"([.,!?;:\"'()\[\]{}…])")
 
 class ModeloMarkov:
     """
-    Cadeia de Markov de ordem N com anti-plágio e anti-loop.
+    Cadeia de Markov de ordem N com anti-plágio, anti-loop e anti-colagem-única.
+
+    Estrutura interna do modelo:
+        {estado_tuple: {token: {msg_id: contagem}}}
+
+    Guardar a contagem por `msg_id` (em vez de só um total) permite saber,
+    a qualquer momento da geração, de qual mensagem original cada palavra
+    escolhida "puxou" — e assim forçar que a frase final seja uma colagem
+    de várias mensagens, não uma cópia quase literal de uma só.
     """
 
     def __init__(self, ordem: int = 2):
         self.ordem = ordem
-        # {estado_tuple: {token: contagem}}
-        self.modelo: dict[tuple, dict[str, int]] = defaultdict(lambda: defaultdict(int))
+        self.modelo: dict[tuple, dict[str, dict[int, int]]] = defaultdict(
+            lambda: defaultdict(lambda: defaultdict(int))
+        )
         self.total_treinadas = 0
         # Conjunto normalizado das mensagens vistas — usado para anti-plágio
         self._frases_vistas: set[str] = set()
+        # Contador incremental de ids de mensagem (só precisa ser único
+        # dentro desta instância do modelo)
+        self._proximo_id = 0
 
     # ── limpeza ──────────────────────────────────────────────────
 
@@ -98,11 +130,16 @@ class ModeloMarkov:
         # Registra frase original normalizada para anti-plágio
         self._frases_vistas.add(self._normalizar(texto))
 
+        # Cada mensagem treinada ganha um id único, usado para rastrear
+        # de onde cada transição do modelo veio.
+        msg_id = self._proximo_id
+        self._proximo_id += 1
+
         seq = [_INICIO] * self.ordem + palavras + [_FIM]
         for i in range(len(seq) - self.ordem):
             estado  = tuple(seq[i : i + self.ordem])
             proxima = seq[i + self.ordem]
-            self.modelo[estado][proxima] += 1
+            self.modelo[estado][proxima][msg_id] += 1
 
         self.total_treinadas += 1
 
@@ -134,13 +171,36 @@ class ModeloMarkov:
 
         return estado_padrao
 
+    def _escolher_proximo(
+        self, candidatos: dict[str, dict[int, int]]
+    ) -> tuple[str, int]:
+        """
+        Escolhe o próximo token de forma puramente proporcional à frequência
+        real das transições (sem forçar troca de fonte — isso é o que
+        mantém a frase coerente). Também sorteia, dentre as mensagens que
+        contribuíram para o token escolhido, qual delas será "creditada"
+        como origem deste passo (usado só para o anti-colagem-única).
+        """
+        tokens = list(candidatos.keys())
+        pesos = [sum(fontes.values()) for fontes in candidatos.values()]
+        tok = random.choices(tokens, weights=pesos, k=1)[0]
+        fontes = candidatos[tok]
+        fonte = random.choices(
+            list(fontes.keys()), weights=list(fontes.values()), k=1
+        )[0]
+        return tok, fonte
+
     def _gerar_uma_vez(self, max_palavras: int, min_palavras: int) -> str | None:
         if not self.modelo:
             return None
 
         estado = self._escolher_estado_inicial()
         geradas: list[str] = []
-        vistos: set[tuple] = set()   # anti-loop: detecta estados repetidos
+        fontes_sequencia: list[int] = []   # fonte atribuída a cada palavra gerada
+        vistos: set[tuple] = set()          # anti-loop: detecta estados repetidos
+
+        streak_fonte: int | None = None
+        streak_tamanho = 0
 
         for _ in range(max_palavras):
             # Anti-loop: se voltou a um estado já visitado, para
@@ -152,16 +212,27 @@ class ModeloMarkov:
             if not candidatos:
                 break
 
-            tokens = list(candidatos.keys())
-            pesos  = list(candidatos.values())
-            prox   = random.choices(tokens, weights=pesos, k=1)[0]
+            prox, fonte = self._escolher_proximo(candidatos)
 
             if prox == _FIM:
                 break
             if prox not in (_INICIO, _FIM):
                 geradas.append(prox)
+                fontes_sequencia.append(fonte)
+
+            if fonte == streak_fonte:
+                streak_tamanho += 1
+            else:
+                streak_fonte = fonte
+                streak_tamanho = 1
 
             estado = tuple(list(estado[1:]) + [prox])
+
+            # Anti-colagem-única "suave": paramos aqui em vez de forçar um
+            # salto de assunto. A frase fica só um pouco mais curta, mas
+            # continua fazendo sentido.
+            if streak_tamanho >= MAX_TRECHO_MESMA_FONTE:
+                break
 
         if len(geradas) < min_palavras:
             return None
@@ -180,7 +251,8 @@ class ModeloMarkov:
     ) -> str | None:
         """
         Tenta gerar até `tentativas` vezes; descarta frases que sejam
-        cópias de mensagens já vistas (anti-plágio).
+        cópias de mensagens já vistas (anti-plágio) ou que, sendo longas,
+        não atinjam a colagem mínima de fontes exigida.
         """
         for _ in range(tentativas):
             frase = self._gerar_uma_vez(max_palavras, min_palavras)
@@ -308,6 +380,7 @@ class MarkovCog(commands.Cog):
         embed.add_field(name="Chance de falar",      value=f"{TRIGGER_CHANCE * 100:.1f}%",   inline=True)
         embed.add_field(name="Min. para ativar",     value=str(MIN_MSGS_TREINO),             inline=True)
         embed.add_field(name="Limite de historico",  value=f"{HISTORICO_LIMITE:,}",          inline=True)
+        embed.add_field(name="Max. trecho de 1 fonte", value=f"{MAX_TRECHO_MESMA_FONTE} palavras", inline=True)
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
     @app_commands.command(

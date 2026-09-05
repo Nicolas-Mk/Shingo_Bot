@@ -31,11 +31,12 @@ CANAIS_VALIDOS = {
 # ──────────────────────────────────────────────────────────────────
 
 MODULOS_VALIDOS = {
-    "markov":     "Frases automáticas por Cadeia de Markov (/markov)",
-    "mal_mensal": "Relatório mensal de atividade no MAL",
-    "call_cheia": "Aviso de call cheia",
-    "levelup":    "Mensagens de level up no chat",
-    "gerador":    "Gerador de texto aleatório (desafio de digitação)",
+    "markov":       "Frases automáticas por Cadeia de Markov (/markov)",
+    "mal_mensal":   "Relatório mensal de atividade no MAL",
+    "call_cheia":   "Aviso de call cheia",
+    "levelup":      "Mensagens de level up no chat",
+    "levelup_ping": "Marcar (ping) o usuário ao subir de nível",
+    "gerador":      "Gerador de texto aleatório (desafio de digitação)",
 }
 
 
