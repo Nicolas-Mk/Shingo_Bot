@@ -37,6 +37,16 @@ DB_PATH = "usuarios.db"
 PESO_EPISODIO = 1
 PESO_VOLUME   = 2
 
+# Normalização de episódios por duração real (ver _multiplicador_duracao):
+# um anime de 1 min/episódio não pode valer o mesmo que um de 24 min — sem
+# isso, dá pra inflar a pontuação só maratonando animes curtos. 20 min é a
+# duração "padrão" usada como referência; entre 20 e 30 min (a faixa mais
+# comum de anime de TV) não há ajuste, pra não penalizar a maioria dos casos
+# por variações pequenas e irrelevantes de duração.
+BASE_DURACAO_MIN = 20
+FAIXA_SEM_AJUSTE_MIN = 20
+FAIXA_SEM_AJUSTE_MAX = 30
+
 # Quantos usuários entram em cada imagem do ranking antes de continuar em
 # uma nova mensagem — mesmo valor do ITENS_POR_IMAGEM do relatório horário.
 USUARIOS_POR_IMAGEM = 2
@@ -89,10 +99,32 @@ def marcar_enviado(guild_id: int, mes: str):
 #  Agregação — lê direto de mal_progresso_mensal
 # ──────────────────────────────────────────────
 
+def _multiplicador_duracao(duracao_min: int) -> float:
+    """
+    Peso aplicado aos episódios de um anime conforme a duração real do
+    episódio. Fora da faixa "normal" (20-30 min), escala linearmente com
+    (duração / 20) — um episódio de 1 min vale 0.05x, um de 40 min vale 2x.
+    Duração desconhecida (0, mangá ou ainda não populada) não penaliza nem
+    beneficia: conta como peso cheio (1x).
+    """
+    if not duracao_min or duracao_min <= 0:
+        return 1.0
+    if FAIXA_SEM_AJUSTE_MIN <= duracao_min <= FAIXA_SEM_AJUSTE_MAX:
+        return 1.0
+    return duracao_min / BASE_DURACAO_MIN
+
+
 def calcular_estatisticas_usuario(username: str, mes: str) -> dict:
     """
     Soma, para o `mes` informado ("YYYY-MM"), o progresso acumulado na
     tabela mal_progresso_mensal (episodios_mes/volumes_mes/completou_mes).
+
+    Episódios de anime são ponderados pela duração real do episódio
+    (duracao_ep_min, ver _multiplicador_duracao) ANTES de somar pontos —
+    sem isso, maratonar um anime de 1 min/episódio vale o mesmo que um de
+    24 min, o que permite inflar a pontuação artificialmente. O número de
+    episódios exibido na UI continua sendo o bruto (real); só a pontuação
+    usa o valor ponderado.
 
     Como esses acumuladores vivem numa linha por item (sem histórico de
     eventos), só entram na soma os itens cujo mes_referencia ainda é igual
@@ -104,27 +136,44 @@ def calcular_estatisticas_usuario(username: str, mes: str) -> dict:
         c = conn.cursor()
         c.execute(
             """
-            SELECT
-                COALESCE(SUM(CASE WHEN tipo = 'anime' THEN episodios_mes ELSE 0 END), 0),
-                COALESCE(SUM(CASE WHEN tipo = 'anime' THEN completou_mes ELSE 0 END), 0),
-                COALESCE(SUM(CASE WHEN tipo = 'manga' THEN volumes_mes   ELSE 0 END), 0),
-                COALESCE(SUM(CASE WHEN tipo = 'manga' THEN completou_mes ELSE 0 END), 0)
+            SELECT episodios_mes, completou_mes, duracao_ep_min
             FROM mal_progresso_mensal
-            WHERE username = ? AND mes_referencia = ?
+            WHERE username = ? AND tipo = 'anime' AND mes_referencia = ?
             """,
             (username, mes),
         )
-        row = c.fetchone()
+        linhas_anime = c.fetchall()
 
-    episodios, animes_completos, volumes, mangas_completos = row
-    pontuacao = episodios * PESO_EPISODIO + volumes * PESO_VOLUME
+        c.execute(
+            """
+            SELECT
+                COALESCE(SUM(volumes_mes), 0),
+                COALESCE(SUM(completou_mes), 0)
+            FROM mal_progresso_mensal
+            WHERE username = ? AND tipo = 'manga' AND mes_referencia = ?
+            """,
+            (username, mes),
+        )
+        volumes, mangas_completos = c.fetchone()
+
+    episodios = 0
+    episodios_ponderados = 0.0
+    animes_completos = 0
+    for ep_mes, comp_mes, duracao_min in linhas_anime:
+        episodios += ep_mes
+        animes_completos += comp_mes
+        episodios_ponderados += ep_mes * _multiplicador_duracao(duracao_min)
+
+    pontuacao = round(episodios_ponderados * PESO_EPISODIO + volumes * PESO_VOLUME)
+
     return {
-        "username":          username,
-        "episodios":         episodios,
-        "animes_completos":  animes_completos,
-        "volumes":           volumes,
-        "mangas_completos":  mangas_completos,
-        "pontuacao":         pontuacao,
+        "username":             username,
+        "episodios":            episodios,
+        "episodios_ponderados": round(episodios_ponderados, 1),
+        "animes_completos":     animes_completos,
+        "volumes":              volumes,
+        "mangas_completos":     mangas_completos,
+        "pontuacao":            pontuacao,
     }
 
 
@@ -160,7 +209,7 @@ def parse_mes_str(mes_str: str | None, agora: datetime) -> tuple[int, int]:
 #  Geração dos cards visuais (reaproveita o estilo do mal_tracker_cog)
 # ──────────────────────────────────────────────
 
-_ROW_H_RANKING = 118
+_ROW_H_RANKING = 136
 _AV_TAM = 64
 _MEDALHA_COR = {
     1: (255, 215, 0),    # ouro
@@ -225,8 +274,9 @@ def gerar_cabecalho_mensal(mes: int, ano: int, total_usuarios: int, total_pontos
 
 def gerar_imagem_ranking(usuarios_pagina: list[dict], indice_inicial: int, pagina: int, total_paginas: int) -> bytes:
     """
-    Gera um card com uma linha por usuário: posição, avatar, nome, stats
-    (animes/episódios/mangás/volumes) e pontuação em destaque à direita.
+    Gera um card com uma linha por usuário: posição, avatar, nome, stats de
+    anime e de mangá em linhas separadas (evita que o texto fique apertado
+    quando o usuário tem atividade nos dois) e pontuação em destaque à direita.
     """
     s = _SS
     pad, row_h, card_w = _PAD * s, _ROW_H_RANKING * s, _CARD_W * s
@@ -266,25 +316,48 @@ def gerar_imagem_ranking(usuarios_pagina: list[dict], indice_inicial: int, pagin
         cor_borda = COR_ANIME if dados["episodios"] >= dados["volumes"] else COR_MANGA
         draw.ellipse((av_x, av_y, av_x + av_tam, av_y + av_tam), outline=cor_borda, width=3 * s)
 
-        # Nome + stats
+        # Nome + stats (anime e mangá em linhas separadas — juntos numa linha
+        # só, vez ou outra não cabia o texto dos dois)
         tx = av_x + av_tam + 18 * s
         largura_max_stats = card_w - pad - 12 * s - tx - 170 * s
 
-        nome_y = int(cy - 30 * s)
+        partes_anime = []
+        if dados["animes_completos"]:
+            partes_anime.append(f"{dados['animes_completos']} anime(s) completo(s)")
+        if dados["episodios"]:
+            # Mostra o valor ponderado entre parênteses só quando ele difere
+            # de forma perceptível do bruto — a maioria dos animes fica na
+            # faixa sem ajuste (20-30 min) e os dois números seriam iguais,
+            # o que só poluiria a tela à toa.
+            texto_ep = f"{dados['episodios']} ep assistidos"
+            if abs(dados["episodios"] - dados["episodios_ponderados"]) >= 1:
+                texto_ep += f" ({dados['episodios_ponderados']:.1f} ponderados)"
+            partes_anime.append(texto_ep)
+        linha_anime = " · ".join(partes_anime)
+
+        partes_manga = []
+        if dados["mangas_completos"]:
+            partes_manga.append(f"{dados['mangas_completos']} mangá(s) completo(s)")
+        if dados["volumes"]:
+            partes_manga.append(f"{dados['volumes']} vol lidos")
+        linha_manga = " · ".join(partes_manga)
+
+        sem_atividade = not linha_anime and not linha_manga
+
+        nome_y = int(cy - 44 * s)
         draw.text((tx, nome_y), f"@{dados['username']}", font=f_nome, fill=(255, 255, 255))
 
-        partes_stats = []
-        if dados["animes_completos"]:
-            partes_stats.append(f"{dados['animes_completos']} anime(s) completo(s)")
-        if dados["episodios"]:
-            partes_stats.append(f"{dados['episodios']} ep assistidos")
-        if dados["mangas_completos"]:
-            partes_stats.append(f"{dados['mangas_completos']} mangá(s) completo(s)")
-        if dados["volumes"]:
-            partes_stats.append(f"{dados['volumes']} vol lidos")
-        stats_texto = " · ".join(partes_stats) if partes_stats else "sem atividade registrada"
-        stats_disp = _truncar_texto(draw, stats_texto, f_stats, largura_max_stats)
-        draw.text((tx, nome_y + 34 * s), stats_disp, font=f_stats, fill=_TEXT_MUTED)
+        linha_y = nome_y + 34 * s
+        if sem_atividade:
+            draw.text((tx, linha_y), "sem atividade registrada", font=f_stats, fill=_TEXT_MUTED)
+        else:
+            if linha_anime:
+                linha_disp = _truncar_texto(draw, linha_anime, f_stats, largura_max_stats)
+                draw.text((tx, linha_y), linha_disp, font=f_stats, fill=_TEXT_MUTED)
+                linha_y += 22 * s
+            if linha_manga:
+                linha_disp = _truncar_texto(draw, linha_manga, f_stats, largura_max_stats)
+                draw.text((tx, linha_y), linha_disp, font=f_stats, fill=_TEXT_MUTED)
 
         # Pontuação em destaque à direita
         pontos_texto = str(dados["pontuacao"])

@@ -104,7 +104,7 @@ class UserProfileCog(commands.Cog):
             c = conn.cursor()
 
         c.execute("""
-            SELECT nome, discriminator, data_registro, descricao, xp, nivel, flingers
+            SELECT nome, discriminator, data_registro, descricao, xp, nivel, flingers, banco
             FROM usuarios
             WHERE id = ? AND guild_id = ?
         """, (user.id, guild_id))
@@ -112,7 +112,8 @@ class UserProfileCog(commands.Cog):
         dados = c.fetchone()
 
         if dados:
-            nome, discriminator, data_registro, descricao, xp, nivel, flingers = dados
+            nome, discriminator, data_registro, descricao, xp, nivel, flingers, banco = dados
+            total = flingers + banco
             embed = discord.Embed(title="📋 Perfil do Usuário", color=discord.Color.blue())
             embed.set_thumbnail(url=user.avatar.url if user.avatar else user.default_avatar.url)
             embed.add_field(name="👤 Usuário",      value=f"{nome}#{discriminator}",          inline=False)
@@ -120,7 +121,9 @@ class UserProfileCog(commands.Cog):
             embed.add_field(name="📝 Descrição",     value=descricao or "Sem descrição definida", inline=False)
             embed.add_field(name="📊 XP",            value=f"{xp} XP",                        inline=True)
             embed.add_field(name="🔝 Nível",         value=f"{nivel}",                        inline=True)
-            embed.add_field(name="💰 Flingers",      value=f"{flingers}",                     inline=True)
+            embed.add_field(name="💰 Total",         value=f"{total}",                        inline=True)
+            embed.add_field(name="👛 Carteira",      value=f"{flingers}",                     inline=True)
+            embed.add_field(name="🏦 Banco",         value=f"{banco}",                        inline=True)
             await interaction.response.send_message(embed=embed)
         else:
             await interaction.response.send_message(

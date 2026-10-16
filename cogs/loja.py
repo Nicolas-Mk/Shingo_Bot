@@ -212,32 +212,104 @@ class LojaCog(commands.Cog):
             f"✅ Item **{item['nome']}** removido da loja.", ephemeral=True
         )
 
-    @app_commands.command(name="loja_editar_estoque", description="[Admin] Altera o estoque de um item.")
-    @app_commands.describe(nome="Item a editar", estoque="Novo estoque (-1 para ilimitado)")
+    @app_commands.command(name="loja_editar_item", description="[Admin] Edita um item da loja. Deixe um parâmetro vazio para não alterá-lo.")
+    @app_commands.describe(
+        nome="Item a editar",
+        novo_nome="Novo nome do item (deixe vazio para manter)",
+        descricao="Nova descrição (deixe vazio para manter)",
+        preco="Novo preço em flingers (deixe vazio para manter)",
+        estoque="Novo estoque, -1 para ilimitado (deixe vazio para manter)",
+        icone="Novo emote/emoji (deixe vazio para manter)",
+    )
     @app_commands.autocomplete(nome=_autocomplete_loja_admin)
     @app_commands.checks.has_permissions(administrator=True)
-    async def loja_editar_estoque(self, interaction: discord.Interaction, nome: str, estoque: int):
+    async def loja_editar_item(
+        self,
+        interaction: discord.Interaction,
+        nome: str,
+        novo_nome: str = None,
+        descricao: str = None,
+        preco: int = None,
+        estoque: int = None,
+        icone: str = None,
+    ):
+        guild_id = interaction.guild_id
+
         with sqlite3.connect("usuarios.db") as conn:
             c = conn.cursor()
             c.execute(
-            "SELECT id, nome FROM loja_itens WHERE guild_id = ? AND LOWER(nome) = LOWER(?)",
-            (interaction.guild_id, nome)
+            "SELECT id, nome, descricao, preco, estoque, icone FROM loja_itens WHERE guild_id = ? AND LOWER(nome) = LOWER(?) AND ativo = 1",
+            (guild_id, nome)
             )
             row = c.fetchone()
-        item = {"id": row[0], "nome": row[1]} if row else None
+        item = {"id": row[0], "nome": row[1], "descricao": row[2], "preco": row[3], "estoque": row[4], "icone": row[5]} if row else None
 
         if not item:
             await interaction.response.send_message("❌ Item não encontrado.", ephemeral=True)
             return
 
-        with sqlite3.connect("usuarios.db") as conn:
-                    conn.execute("UPDATE loja_itens SET estoque = ? WHERE id = ?", (estoque, item["id"]))
-        conn.commit()
+        # Nenhum parâmetro de alteração foi informado
+        if all(v is None for v in (novo_nome, descricao, preco, estoque, icone)):
+            await interaction.response.send_message(
+                "⚠️ Você não informou nenhum parâmetro para alterar.", ephemeral=True
+            )
+            return
 
-        estoque_str = "Ilimitado" if estoque == -1 else str(estoque)
-        await interaction.response.send_message(
-            f"✅ Estoque de **{item['nome']}** atualizado para **{estoque_str}**.", ephemeral=True
-        )
+        # Validações dos campos fornecidos
+        if preco is not None and preco <= 0:
+            await interaction.response.send_message("❌ O preço deve ser maior que zero.", ephemeral=True)
+            return
+        if estoque is not None and estoque == 0:
+            await interaction.response.send_message("❌ Estoque não pode ser zero. Use -1 para ilimitado.", ephemeral=True)
+            return
+
+        # Se o nome for alterado, verifica se já existe outro item ativo com esse nome
+        if novo_nome is not None and novo_nome.lower() != item["nome"].lower():
+            with sqlite3.connect("usuarios.db") as conn:
+                c = conn.cursor()
+                c.execute(
+                "SELECT id FROM loja_itens WHERE guild_id = ? AND LOWER(nome) = LOWER(?) AND ativo = 1 AND id != ?",
+                (guild_id, novo_nome, item["id"])
+                )
+                if c.fetchone():
+                    await interaction.response.send_message(
+                        f"❌ Já existe um item chamado **{novo_nome}**.", ephemeral=True
+                    )
+                    return
+
+        # Mantém o valor atual para todo parâmetro não informado
+        novos_valores = {
+            "nome":      novo_nome if novo_nome is not None else item["nome"],
+            "descricao": descricao if descricao is not None else item["descricao"],
+            "preco":     preco if preco is not None else item["preco"],
+            "estoque":   estoque if estoque is not None else item["estoque"],
+            "icone":     icone if icone is not None else item["icone"],
+        }
+
+        with sqlite3.connect("usuarios.db") as conn:
+            conn.execute(
+                "UPDATE loja_itens SET nome = ?, descricao = ?, preco = ?, estoque = ?, icone = ? WHERE id = ?",
+                (
+                    novos_valores["nome"],
+                    novos_valores["descricao"],
+                    novos_valores["preco"],
+                    novos_valores["estoque"],
+                    novos_valores["icone"],
+                    item["id"],
+                )
+            )
+            conn.commit()
+
+        estoque_str  = "Ilimitado" if novos_valores["estoque"] == -1 else str(novos_valores["estoque"])
+        nome_exibido = f"{novos_valores['icone']} {novos_valores['nome']}" if novos_valores["icone"] else novos_valores["nome"]
+
+        embed = discord.Embed(title="✅ Item atualizado", color=0x2E51A2)
+        embed.add_field(name="Nome",      value=nome_exibido,                          inline=True)
+        embed.add_field(name="Preço",     value=f"{novos_valores['preco']} flingers",  inline=True)
+        embed.add_field(name="Estoque",   value=estoque_str,                           inline=True)
+        embed.add_field(name="Descrição", value=novos_valores["descricao"],            inline=False)
+        await interaction.response.send_message(embed=embed, ephemeral=True)
+        print(f"[Loja] Item '{item['nome']}' editado na guild {guild_id} por {interaction.user}.")
 
     # ──────────────────────────────────────────
     #  Comandos — usuários

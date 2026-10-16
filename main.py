@@ -15,10 +15,14 @@ from cogs.mal_tracker import MalTrackerCog
 from cogs.loja import LojaCog
 from cogs.mal_lookup import MalLookupCog
 from cogs.markov_cog import MarkovCog
-from cogs.insult_cog import InsultCog
+# from cogs.insult_cog import InsultCog
 from cogs.mal_mensal import MalMensalCog
 from cogs.mal_top_anime import MalTopCog
 from cogs.mal_top_manga import MalTopMangaCog
+from cogs.resumo_mes import ResumoMesCog
+from cogs.help_cog import HelpCog
+from cogs.anime_random_cog import AnimeAleatorioCog
+from cogs.mal_estudios_cog import MalEstudiosCog
 
 load_dotenv()
 TOKEN = os.getenv('DISCORD_TOKEN')
@@ -45,9 +49,13 @@ class CustomBot(commands.Bot):
         await self.add_cog(MalTopCog(self))
         await self.add_cog(LojaCog(self))
         await self.add_cog(MarkovCog(self))
-        await self.add_cog(InsultCog(self))
+        # await self.add_cog(InsultCog(self))
         await self.add_cog(MalMensalCog(self))
         await self.add_cog(MalTopMangaCog(self))
+        await self.add_cog(ResumoMesCog(self))
+        await self.add_cog(HelpCog(self))
+        await self.add_cog(AnimeAleatorioCog(self))
+        await self.add_cog(MalEstudiosCog(self))
 
         synced = await self.tree.sync()
         print(f"✅ {len(synced)} comandos sincronizados.")
@@ -71,10 +79,8 @@ async def on_app_command_error(interaction: discord.Interaction, error: app_comm
                 "❌ Ocorreu um erro ao executar este comando.", ephemeral=True
             )
 
-
 @bot.event
 async def on_ready():
     print(f'🤖 Bot conectado como {bot.user}')
-
 
 bot.run(TOKEN)

@@ -11,21 +11,45 @@ from discord import app_commands
 
 MAL_CLIENT_ID: str = os.getenv("MAL_CLIENT_ID", "")
 MAL_API_BASE        = "https://api.myanimelist.net/v2"
+ANILIST_API_BASE    = "https://graphql.anilist.co"
 
 STATUS_LABEL_ANIME = {
-    "watching":      ("▶️",  "Assistindo"),
-    "completed":     ("✅",  "Completou"),
-    "on_hold":       ("⏸️", "Em pausa"),
-    "dropped":       ("🗑️", "Dropou"),
-    "plan_to_watch": ("📋",  "Quer assistir"),
+    "watching":      "Assistindo",
+    "completed":     "Completou",
+    "on_hold":       "Em pausa",
+    "dropped":       "Dropou",
+    "plan_to_watch": "Quer assistir",
 }
 
 STATUS_LABEL_MANGA = {
-    "reading":      ("📖",  "Lendo"),
-    "completed":    ("✅",  "Completou"),
-    "on_hold":      ("⏸️", "Em pausa"),
-    "dropped":      ("🗑️", "Dropou"),
-    "plan_to_read": ("📋",  "Quer ler"),
+    "reading":      "Lendo",
+    "completed":    "Completou",
+    "on_hold":      "Em pausa",
+    "dropped":      "Dropou",
+    "plan_to_read": "Quer ler",
+}
+
+# Tradução dos valores do campo "source" do MAL/AniList (material de origem do anime)
+SOURCE_LABELS = {
+    "original":      "Original",
+    "manga":         "Mangá",
+    "4_koma_manga":  "Mangá 4-koma",
+    "web_manga":     "Web Mangá",
+    "digital_manga": "Mangá Digital",
+    "novel":         "Novel",
+    "light_novel":   "Light Novel",
+    "visual_novel":  "Visual Novel",
+    "game":          "Jogo",
+    "card_game":     "Card Game",
+    "book":          "Livro",
+    "picture_book":  "Livro Ilustrado",
+    "radio":         "Rádio",
+    "music":         "Música",
+    "web_novel":     "Web Novel",
+    "mixed_media":   "Mixed Media",
+    "doujinshi":     "Doujinshi",
+    "anime":         "Anime",
+    "other":         "Outro",
 }
 
 
@@ -73,30 +97,138 @@ def _calcular_media(entradas: dict[str, dict]) -> tuple[float, int]:
 
 
 # ──────────────────────────────────────────────────────────────────
-#  Helpers de API (apenas para busca/autocomplete e detalhes do item)
+#  Helpers de formatação — linhas extras do embed (formato, nota,
+#  estúdio/autor, ano e fonte)
+# ──────────────────────────────────────────────────────────────────
+
+def _campos_extra_anime(dados_mal: dict, extra_al: dict) -> list[tuple[str, str]]:
+    """
+    Monta os campos (label/valor) da grade de dados do anime, no estilo
+    AniSearch: Episódios, Formato, Nota, Estúdio, Ano, Fonte.
+    Prioriza dados do MAL e usa o AniList como fallback quando algo faltar.
+    Só inclui campos cujo valor foi encontrado.
+    """
+    campos: list[tuple[str, str]] = []
+
+    num_eps = dados_mal.get("num_episodes")
+    if num_eps:
+        campos.append(("Episódios", str(num_eps)))
+
+    formato = (dados_mal.get("media_type") or extra_al.get("format") or "").upper().replace("_", " ")
+    if formato:
+        campos.append(("Formato", formato))
+
+    nota = dados_mal.get("mean")
+    if not nota and extra_al.get("averageScore"):
+        nota = round(extra_al["averageScore"] / 10, 2)
+    if nota:
+        campos.append(("Nota MAL", f"{nota}/10"))
+
+    estudios = dados_mal.get("studios") or []
+    nome_estudio = ", ".join(s.get("name", "") for s in estudios[:2] if s.get("name"))
+    if not nome_estudio:
+        estudios_al = (extra_al.get("studios") or {}).get("nodes") or []
+        nome_estudio = ", ".join(s.get("name", "") for s in estudios_al[:2] if s.get("name"))
+    if nome_estudio:
+        campos.append(("Estúdio", nome_estudio))
+
+    ano = (dados_mal.get("start_season") or {}).get("year")
+    if not ano:
+        ano = (extra_al.get("startDate") or {}).get("year")
+    if ano:
+        campos.append(("Ano", str(ano)))
+
+    fonte_raw = (dados_mal.get("source") or extra_al.get("source") or "").lower()
+    fonte = SOURCE_LABELS.get(fonte_raw, fonte_raw.replace("_", " ").title() if fonte_raw else None)
+    if fonte:
+        campos.append(("Fonte", fonte))
+
+    return campos
+
+
+def _campos_extra_manga(dados_mal: dict, extra_al: dict) -> list[tuple[str, str]]:
+    """
+    Monta os campos (label/valor) da grade de dados do mangá, no estilo
+    AniSearch: Capítulos, Formato, Nota, Autor, Ano.
+    """
+    campos: list[tuple[str, str]] = []
+
+    num_caps = dados_mal.get("num_chapters")
+    if num_caps:
+        campos.append(("Capítulos", str(num_caps)))
+
+    formato = (dados_mal.get("media_type") or extra_al.get("format") or "").upper().replace("_", " ")
+    if formato:
+        campos.append(("Formato", formato))
+
+    nota = dados_mal.get("mean")
+    if not nota and extra_al.get("averageScore"):
+        nota = round(extra_al["averageScore"] / 10, 2)
+    if nota:
+        campos.append(("Nota MAL", f"{nota}/10"))
+
+    autores = dados_mal.get("authors") or []
+    nomes_autores = ", ".join(
+        filter(None, (
+            f"{a.get('node', {}).get('first_name', '')} {a.get('node', {}).get('last_name', '')}".strip()
+            for a in autores[:2]
+        ))
+    )
+    if nomes_autores:
+        campos.append(("Autor", nomes_autores))
+
+    serializacoes = dados_mal.get("serialization") or []
+    nome_revista = ", ".join(
+        s.get("node", {}).get("name", "") for s in serializacoes[:2] if s.get("node", {}).get("name")
+    )
+    if nome_revista:
+        campos.append(("Revista", nome_revista))
+
+    ano = None
+    start_date = dados_mal.get("start_date")
+    if start_date:
+        ano = start_date.split("-")[0]
+    if not ano:
+        ano = (extra_al.get("startDate") or {}).get("year")
+    if ano:
+        campos.append(("Ano", str(ano)))
+
+    return campos
+
+
+# ──────────────────────────────────────────────────────────────────
+#  Helpers de API — MyAnimeList (fonte primária)
 # ──────────────────────────────────────────────────────────────────
 
 async def _buscar_anime(session: aiohttp.ClientSession, query: str) -> list[dict]:
     url    = f"{MAL_API_BASE}/anime"
-    params = {"q": query, "limit": 8, "fields": "id,title,main_picture,num_episodes,media_type"}
+    params = {
+        "q": query,
+        "limit": 8,
+        "fields": "id,title,main_picture,num_episodes,media_type,mean,studios{name},start_season{year},source",
+    }
     try:
         async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=15)) as resp:
             if resp.status == 200:
                 return (await resp.json()).get("data", [])
     except Exception as e:
-        print(f"[MAL Lookup] Erro ao buscar anime '{query}': {e}")
+        print(f"[MAL Lookup] Erro ao buscar anime '{query}' no MAL: {e}")
     return []
 
 
 async def _buscar_manga(session: aiohttp.ClientSession, query: str) -> list[dict]:
     url    = f"{MAL_API_BASE}/manga"
-    params = {"q": query, "limit": 8, "fields": "id,title,main_picture,num_chapters,media_type"}
+    params = {
+        "q": query,
+        "limit": 8,
+        "fields": "id,title,main_picture,num_chapters,media_type,mean,authors{first_name,last_name},start_date,serialization{name}",
+    }
     try:
         async with session.get(url, params=params, timeout=aiohttp.ClientTimeout(total=15)) as resp:
             if resp.status == 200:
                 return (await resp.json()).get("data", [])
     except Exception as e:
-        print(f"[MAL Lookup] Erro ao buscar manga '{query}': {e}")
+        print(f"[MAL Lookup] Erro ao buscar manga '{query}' no MAL: {e}")
     return []
 
 
@@ -104,13 +236,15 @@ async def _buscar_detalhes_anime(session: aiohttp.ClientSession, anime_id: int) 
     try:
         async with session.get(
             f"{MAL_API_BASE}/anime/{anime_id}",
-            params={"fields": "id,title,main_picture,num_episodes,media_type"},
+            params={
+                "fields": "id,title,main_picture,num_episodes,media_type,mean,studios{name},start_season{year},source",
+            },
             timeout=aiohttp.ClientTimeout(total=15),
         ) as resp:
             if resp.status == 200:
                 return await resp.json()
     except Exception as e:
-        print(f"[MAL Lookup] Erro ao buscar detalhes do anime {anime_id}: {e}")
+        print(f"[MAL Lookup] Erro ao buscar detalhes do anime {anime_id} no MAL: {e}")
     return {}
 
 
@@ -118,14 +252,160 @@ async def _buscar_detalhes_manga(session: aiohttp.ClientSession, manga_id: int) 
     try:
         async with session.get(
             f"{MAL_API_BASE}/manga/{manga_id}",
-            params={"fields": "id,title,main_picture,num_chapters,media_type"},
+            params={
+                "fields": "id,title,main_picture,num_chapters,media_type,mean,authors{first_name,last_name},start_date,serialization{name}",
+            },
             timeout=aiohttp.ClientTimeout(total=15),
         ) as resp:
             if resp.status == 200:
                 return await resp.json()
     except Exception as e:
-        print(f"[MAL Lookup] Erro ao buscar detalhes do manga {manga_id}: {e}")
+        print(f"[MAL Lookup] Erro ao buscar detalhes do manga {manga_id} no MAL: {e}")
     return {}
+
+
+# ──────────────────────────────────────────────────────────────────
+#  Helpers de API — AniList (fallback de nome/detalhes + banner)
+# ──────────────────────────────────────────────────────────────────
+#
+# Usados quando o MAL falha ou não retorna resultado, e também para
+# buscar o banner (o MAL não expõe esse campo). O AniList expõe o
+# campo `idMal`, que é o mesmo ID usado nas listas do MAL — por isso
+# conseguimos usar o resultado dele e ainda casar corretamente com as
+# entradas salvas em mal_snapshots (que são indexadas por ID do MAL).
+
+_ANILIST_SEARCH_QUERY = """
+query ($search: String, $type: MediaType) {
+  Page(perPage: 8) {
+    media(search: $search, type: $type) {
+      idMal
+      title { romaji english }
+      coverImage { medium }
+      episodes
+      chapters
+    }
+  }
+}
+"""
+
+_ANILIST_DETAIL_QUERY = """
+query ($idMal: Int, $type: MediaType) {
+  Media(idMal: $idMal, type: $type) {
+    idMal
+    title { romaji english }
+    coverImage { medium }
+    episodes
+    chapters
+  }
+}
+"""
+
+# Query complementar: banner + campos extras (usada como fallback e
+# sempre chamada para pegar o banner, já que o MAL não tem esse campo)
+_ANILIST_EXTRA_QUERY = """
+query ($idMal: Int, $type: MediaType) {
+  Media(idMal: $idMal, type: $type) {
+    bannerImage
+    format
+    averageScore
+    startDate { year }
+    source
+    studios(isMain: true) { nodes { name } }
+  }
+}
+"""
+
+
+async def _anilist_query(session: aiohttp.ClientSession, query: str, variables: dict) -> dict:
+    try:
+        async with session.post(
+            ANILIST_API_BASE,
+            json={"query": query, "variables": variables},
+            timeout=aiohttp.ClientTimeout(total=15),
+        ) as resp:
+            if resp.status == 200:
+                payload = await resp.json()
+                return payload.get("data") or {}
+    except Exception as e:
+        print(f"[MAL Lookup] Erro ao consultar AniList: {e}")
+    return {}
+
+
+def _anilist_media_to_node(media: dict, tipo: str) -> dict | None:
+    """
+    Converte um objeto 'media' retornado pelo AniList para o mesmo formato
+    de 'node' usado nas respostas do MAL (id, title, main_picture, num_episodes/num_chapters).
+    Retorna None se não houver idMal, já que sem ele não conseguimos casar
+    com as entradas locais dos usuários.
+    """
+    id_mal = media.get("idMal")
+    if not id_mal:
+        return None
+
+    title_obj = media.get("title") or {}
+    titulo = title_obj.get("english") or title_obj.get("romaji")
+    if not titulo:
+        return None
+
+    node = {
+        "id": id_mal,
+        "title": titulo,
+        "main_picture": {"medium": (media.get("coverImage") or {}).get("medium")},
+    }
+    if tipo == "anime":
+        node["num_episodes"] = media.get("episodes")
+    else:
+        node["num_chapters"] = media.get("chapters")
+    return node
+
+
+async def _buscar_anime_anilist(session: aiohttp.ClientSession, query: str) -> list[dict]:
+    data   = await _anilist_query(session, _ANILIST_SEARCH_QUERY, {"search": query, "type": "ANIME"})
+    medias = (data.get("Page") or {}).get("media") or []
+    nodes  = []
+    for m in medias:
+        node = _anilist_media_to_node(m, "anime")
+        if node:
+            nodes.append({"node": node})
+    return nodes
+
+
+async def _buscar_manga_anilist(session: aiohttp.ClientSession, query: str) -> list[dict]:
+    data   = await _anilist_query(session, _ANILIST_SEARCH_QUERY, {"search": query, "type": "MANGA"})
+    medias = (data.get("Page") or {}).get("media") or []
+    nodes  = []
+    for m in medias:
+        node = _anilist_media_to_node(m, "manga")
+        if node:
+            nodes.append({"node": node})
+    return nodes
+
+
+async def _buscar_detalhes_anime_anilist(session: aiohttp.ClientSession, mal_id: int) -> dict:
+    data  = await _anilist_query(session, _ANILIST_DETAIL_QUERY, {"idMal": mal_id, "type": "ANIME"})
+    media = data.get("Media")
+    if not media:
+        return {}
+    return _anilist_media_to_node(media, "anime") or {}
+
+
+async def _buscar_detalhes_manga_anilist(session: aiohttp.ClientSession, mal_id: int) -> dict:
+    data  = await _anilist_query(session, _ANILIST_DETAIL_QUERY, {"idMal": mal_id, "type": "MANGA"})
+    media = data.get("Media")
+    if not media:
+        return {}
+    return _anilist_media_to_node(media, "manga") or {}
+
+
+async def _buscar_extra_anilist(session: aiohttp.ClientSession, mal_id: int, tipo: str) -> dict:
+    """
+    Busca dados complementares no AniList a partir do ID do MAL: banner,
+    formato, nota, ano, fonte e estúdio principal. Chamada sempre (não só
+    como fallback) porque o banner só existe no AniList.
+    """
+    media_type = "ANIME" if tipo == "anime" else "MANGA"
+    data = await _anilist_query(session, _ANILIST_EXTRA_QUERY, {"idMal": mal_id, "type": media_type})
+    return data.get("Media") or {}
 
 
 # ──────────────────────────────────────────────────────────────────
@@ -164,6 +444,8 @@ class MalLookupCog(commands.Cog):
         try:
             session    = await self._get_session()
             resultados = await _buscar_anime(session, current)
+            if not resultados:
+                resultados = await _buscar_anime_anilist(session, current)
             return [
                 app_commands.Choice(
                     name=item["node"]["title"][:90],
@@ -184,6 +466,8 @@ class MalLookupCog(commands.Cog):
         try:
             session    = await self._get_session()
             resultados = await _buscar_manga(session, current)
+            if not resultados:
+                resultados = await _buscar_manga_anilist(session, current)
             return [
                 app_commands.Choice(
                     name=item["node"]["title"][:90],
@@ -212,57 +496,79 @@ class MalLookupCog(commands.Cog):
 
         if not usuarios:
             await interaction.followup.send(
-                "📋 Nenhum usuário monitorado neste servidor. Use `/mal_entrar` para se adicionar.",
+                "Nenhum usuário monitorado neste servidor. Use `/mal_entrar` para se adicionar.",
                 ephemeral=True,
             )
             return
 
-        session  = await self._get_session()
-        titulo   = anime
-        capa_url = None
-        num_eps  = None
+        session   = await self._get_session()
+        titulo    = None
+        capa_url  = None
+        dados_mal = {}
 
-        # Resolve ID e detalhes via API
+        # Resolve ID e detalhes via API (1ª barreira: MAL / 2ª barreira: AniList)
         if anime.isdigit():
-            anime_id = int(anime)
-            dados    = await _buscar_detalhes_anime(session, anime_id)
-            titulo   = dados.get("title", anime)
-            capa_url = dados.get("main_picture", {}).get("medium")
-            num_eps  = dados.get("num_episodes")
+            anime_id  = int(anime)
+            dados_mal = await _buscar_detalhes_anime(session, anime_id)
+            titulo    = dados_mal.get("title")
+            capa_url  = dados_mal.get("main_picture", {}).get("medium")
+
+            if not titulo:
+                dados_al  = await _buscar_detalhes_anime_anilist(session, anime_id)
+                titulo    = dados_al.get("title")
+                capa_url  = capa_url or dados_al.get("main_picture", {}).get("medium")
+                dados_mal.setdefault("num_episodes", dados_al.get("num_episodes"))
+
+            if not titulo:
+                titulo = f"Anime #{anime_id}"
         else:
             resultados = await _buscar_anime(session, anime)
             if not resultados:
+                resultados = await _buscar_anime_anilist(session, anime)
+
+            if not resultados:
                 await interaction.followup.send(
-                    f"❌ Nenhum anime encontrado para **{anime}**.", ephemeral=True
+                    f"Nenhum anime encontrado para **{anime}**.", ephemeral=True
                 )
                 return
-            primeiro = resultados[0]["node"]
-            anime_id = primeiro["id"]
-            titulo   = primeiro["title"]
-            capa_url = primeiro.get("main_picture", {}).get("medium")
-            num_eps  = primeiro.get("num_episodes")
+
+            primeiro  = resultados[0]["node"]
+            anime_id  = primeiro["id"]
+            titulo    = primeiro["title"]
+            capa_url  = primeiro.get("main_picture", {}).get("medium")
+            dados_mal = primeiro  # já traz mean/studios/start_season/source quando vem do MAL
+
+        # Dados complementares: banner (só existe no AniList) + fallback de
+        # formato/nota/estúdio/ano/fonte quando o MAL não trouxe algo
+        extra_al   = await _buscar_extra_anilist(session, anime_id, "anime")
+        banner_url = extra_al.get("bannerImage")
 
         # Busca entradas direto no banco local
         entradas = _buscar_entradas_locais(str(anime_id), "anime", usuarios)
         media, total_notas = _calcular_media(entradas)
 
         mal_url = f"https://myanimelist.net/anime/{anime_id}"
-        eps_str = f" • {num_eps} eps" if num_eps else ""
 
-        # Linha de média do servidor
+        # Linha 1: média do servidor
         if media > 0:
-            media_str = f"📊 Média do servidor: **{media:.2f}/10** ({total_notas} nota(s))"
+            media_str = f"Média do servidor: **{media:.2f}/10** ({total_notas} nota(s))"
         else:
-            media_str = "📊 Média do servidor: **sem notas ainda**"
+            media_str = "Média do servidor: **sem notas ainda**"
 
         embed = discord.Embed(
             title=titulo,
             url=mal_url,
-            description=f"{media_str}{eps_str}",
+            description=media_str,
             color=0x2E51A2,
         )
         if capa_url:
             embed.set_thumbnail(url=capa_url)
+        if banner_url:
+            embed.set_image(url=banner_url)
+
+        # Grade de dados (estilo AniSearch): Episódios, Formato, Nota, Estúdio, Ano, Fonte
+        for label, valor in _campos_extra_anime(dados_mal, extra_al):
+            embed.add_field(name=label, value=valor, inline=True)
 
         if entradas:
             por_status: dict[str, list[str]] = {}
@@ -271,21 +577,19 @@ class MalLookupCog(commands.Cog):
                 score  = entrada.get("score", 0)
                 eps    = entrada.get("num_episodes_watched", 0)
 
-                emoji, label = STATUS_LABEL_ANIME.get(status, ("📝", status))
+                label = STATUS_LABEL_ANIME.get(status, status)
                 linha = f"`{username}`"
 
                 detalhes = []
                 if status == "watching" and eps:
                     detalhes.append(f"EP {eps}")
                 if score and score > 0:
-                    estrelas = "⭐" * min(score // 2, 5)
-                    detalhes.append(f"**{score}/10** {estrelas}")
+                    detalhes.append(f"**{score}/10**")
 
                 if detalhes:
                     linha += f" — {' · '.join(detalhes)}"
 
-                chave = f"{emoji} {label}"
-                por_status.setdefault(chave, []).append(linha)
+                por_status.setdefault(label, []).append(linha)
 
             for status_label, linhas in por_status.items():
                 embed.add_field(name=status_label, value="\n".join(linhas), inline=False)
@@ -320,55 +624,79 @@ class MalLookupCog(commands.Cog):
 
         if not usuarios:
             await interaction.followup.send(
-                "📋 Nenhum usuário monitorado neste servidor. Use `/mal_entrar` para se adicionar.",
+                "Nenhum usuário monitorado neste servidor. Use `/mal_entrar` para se adicionar.",
                 ephemeral=True,
             )
             return
 
-        session  = await self._get_session()
-        titulo   = manga
-        capa_url = None
-        num_caps = None
+        session   = await self._get_session()
+        titulo    = None
+        capa_url  = None
+        dados_mal = {}
 
+        # Resolve ID e detalhes via API (1ª barreira: MAL / 2ª barreira: AniList)
         if manga.isdigit():
-            manga_id = int(manga)
-            dados    = await _buscar_detalhes_manga(session, manga_id)
-            titulo   = dados.get("title", manga)
-            capa_url = dados.get("main_picture", {}).get("medium")
-            num_caps = dados.get("num_chapters")
+            manga_id  = int(manga)
+            dados_mal = await _buscar_detalhes_manga(session, manga_id)
+            titulo    = dados_mal.get("title")
+            capa_url  = dados_mal.get("main_picture", {}).get("medium")
+
+            if not titulo:
+                dados_al  = await _buscar_detalhes_manga_anilist(session, manga_id)
+                titulo    = dados_al.get("title")
+                capa_url  = capa_url or dados_al.get("main_picture", {}).get("medium")
+                dados_mal.setdefault("num_chapters", dados_al.get("num_chapters"))
+
+            if not titulo:
+                titulo = f"Mangá #{manga_id}"
         else:
             resultados = await _buscar_manga(session, manga)
             if not resultados:
+                resultados = await _buscar_manga_anilist(session, manga)
+
+            if not resultados:
                 await interaction.followup.send(
-                    f"❌ Nenhum mangá encontrado para **{manga}**.", ephemeral=True
+                    f"Nenhum mangá encontrado para **{manga}**.", ephemeral=True
                 )
                 return
-            primeiro = resultados[0]["node"]
-            manga_id = primeiro["id"]
-            titulo   = primeiro["title"]
-            capa_url = primeiro.get("main_picture", {}).get("medium")
-            num_caps = primeiro.get("num_chapters")
+
+            primeiro  = resultados[0]["node"]
+            manga_id  = primeiro["id"]
+            titulo    = primeiro["title"]
+            capa_url  = primeiro.get("main_picture", {}).get("medium")
+            dados_mal = primeiro  # já traz mean/authors/start_date quando vem do MAL
+
+        # Dados complementares: banner (só existe no AniList) + fallback de
+        # formato/nota/ano quando o MAL não trouxe algo
+        extra_al   = await _buscar_extra_anilist(session, manga_id, "manga")
+        banner_url = extra_al.get("bannerImage")
 
         # Busca entradas direto no banco local
         entradas = _buscar_entradas_locais(str(manga_id), "manga", usuarios)
         media, total_notas = _calcular_media(entradas)
 
-        mal_url  = f"https://myanimelist.net/manga/{manga_id}"
-        caps_str = f" • {num_caps} caps" if num_caps else ""
+        mal_url = f"https://myanimelist.net/manga/{manga_id}"
 
+        # Linha 1: média do servidor
         if media > 0:
-            media_str = f"📊 Média do servidor: **{media:.2f}/10** ({total_notas} nota(s))"
+            media_str = f"Média do servidor: **{media:.2f}/10** ({total_notas} nota(s))"
         else:
-            media_str = "📊 Média do servidor: **sem notas ainda**"
+            media_str = "Média do servidor: **sem notas ainda**"
 
         embed = discord.Embed(
             title=titulo,
             url=mal_url,
-            description=f"{media_str}{caps_str}",
+            description=media_str,
             color=0x4E0D0D,
         )
         if capa_url:
             embed.set_thumbnail(url=capa_url)
+        if banner_url:
+            embed.set_image(url=banner_url)
+
+        # Grade de dados (estilo AniSearch): Capítulos, Formato, Nota, Autor, Ano
+        for label, valor in _campos_extra_manga(dados_mal, extra_al):
+            embed.add_field(name=label, value=valor, inline=True)
 
         if entradas:
             por_status: dict[str, list[str]] = {}
@@ -377,21 +705,19 @@ class MalLookupCog(commands.Cog):
                 score  = entrada.get("score", 0)
                 caps   = entrada.get("num_chapters_read", 0)
 
-                emoji, label = STATUS_LABEL_MANGA.get(status, ("📝", status))
+                label = STATUS_LABEL_MANGA.get(status, status)
                 linha = f"`{username}`"
 
                 detalhes = []
                 if status == "reading" and caps:
                     detalhes.append(f"Cap {caps}")
                 if score and score > 0:
-                    estrelas = "⭐" * min(score // 2, 5)
-                    detalhes.append(f"**{score}/10** {estrelas}")
+                    detalhes.append(f"**{score}/10**")
 
                 if detalhes:
                     linha += f" — {' · '.join(detalhes)}"
 
-                chave = f"{emoji} {label}"
-                por_status.setdefault(chave, []).append(linha)
+                por_status.setdefault(label, []).append(linha)
 
             for status_label, linhas in por_status.items():
                 embed.add_field(name=status_label, value="\n".join(linhas), inline=False)

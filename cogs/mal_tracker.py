@@ -1,6 +1,5 @@
 import os
 import json
-import math
 import sqlite3
 import asyncio
 import traceback
@@ -8,11 +7,21 @@ import aiohttp
 from io import BytesIO
 from datetime import datetime, timezone, timedelta
 
-from PIL import Image, ImageDraw, ImageFont, ImageOps
+from PIL import Image, ImageDraw, ImageOps
 import discord
 from discord.ext import commands, tasks
 from discord import app_commands
 from cogs.config_cog import get_config
+
+from cogs.mal_visual import (
+    _BG, _CARD_BG, _ROW_BG, _TEXT_MAIN, _TEXT_MUTED,
+    _CARD_W, _HEADER_H, _ROW_H, _GAP, _PAD, _COVER_RATIO, _SS,
+    COR_ANIME, COR_MANGA,
+    _fonte, _mascara_arredondada, _mascara_circular, _desenhar_icone_status,
+    _truncar_texto, _placeholder_cover, _placeholder_avatar, _abrir_imagem,
+    _finalizar_canvas,
+)
+from cogs.mal_easter_eggs import EasterEggManager, EventoEasterEgg
 
 # ══════════════════════════════════════════════
 #  ⚙️  CONFIGURAÇÕES — edite aqui
@@ -41,6 +50,18 @@ COOLDOWN_FAVORITOS = timedelta(days=7)
 # Quantas atualizações de um mesmo usuário entram em uma única imagem
 # antes de continuar em uma nova mensagem.
 ITENS_POR_IMAGEM: int = 2
+
+# Pausa entre chamadas ao Jikan ao processar vários usuários em sequência
+# (sync de favoritos). O Jikan é um proxy comunitário gratuito e documenta
+# dois limites simultâneos: 3 req/s E 60 req/min — o segundo é o que
+# realmente importa aqui, porque passa despercebido: 0.5s de pausa dá
+# 120 req/min, o DOBRO do permitido, e passa a estourar 429 conforme a
+# base de usuários cresce. 1.1s mantém uma margem segura (~54 req/min).
+PAUSA_JIKAN: float = 1.1
+
+# Tentativas de retry em erros transitórios do Jikan (429/5xx/timeout)
+# antes de desistir e devolver None (o que preserva os dados anteriores).
+JIKAN_MAX_TENTATIVAS: int = 4
 
 # ══════════════════════════════════════════════
 
@@ -81,91 +102,6 @@ ROTULOS_MANGA = {
     "dropped":      "Dropou",
     "plan_to_read": "Planeja ler",
 }
-
-# Cores de destaque por tipo, usadas nos cards
-COR_ANIME = (99, 155, 255)   # azul
-COR_MANGA = (255, 130, 130)  # vermelho/rosa
-
-# Borda do card de evento do Shingo: uma versão escurecida de COR_MANGA (em
-# vez do vermelho vivo original), pra manter a identidade visual do mangá
-# sem competir com a atenção que deve ir pra imagem em si.
-COR_SHINGO_BORDA = tuple(int(c * 0.45) for c in COR_ANIME)  # (114, 58, 58)
-
-# ──────────────────────────────────────────────
-#  Easter egg — "Watashi wa Shingo"
-# ──────────────────────────────────────────────
-#
-# ID do mangá "Watashi wa Shingo" no MyAnimeList — usado para disparar a
-# reação especial do bot quando alguém completa a obra, em homenagem ao
-# nome do próprio bot.
-SHINGO_MANGA_ID = "24646"
-
-SHINGO_IMAGENS = {
-    "baixa":          os.path.join("assets", "shingo 3-.jpg"),
-    "media":          os.path.join("assets", "shingo 4-6.jpg"),
-    "neutra":         os.path.join("assets", "shingo 7.jpg"),
-    "elogio":         os.path.join("assets", "shingo 8-9.jpg"),
-    "transcendencia": os.path.join("assets", "shingo 10.jpg"),
-}
-
-
-def _shingo_reacao(nota: int) -> tuple[str, str, str]:
-    """
-    Retorna (chave_imagem, titulo_embed, texto_com_{nota}) de acordo com a
-    nota dada pelo usuário ao completar 'Watashi wa Shingo' (MAL id 24646).
-    """
-    # Sem emoji nos títulos de propósito: eles vão desenhados dentro do PNG
-    # do card (mesma fonte DejaVu usada em gerar_imagem_cabecalho), que não
-    # tem glifos de emoji — apareceria como retângulo vazio ("tofu").
-    if nota <= 3:
-        return (
-            "baixa",
-            "SHINGO NÃO GOSTOU DISSO",
-            "Nota {nota}/10 Shingo te despreza. Pense bem antes de me subestimar."
-        )
-    elif nota <= 6:
-        return (
-            "media",
-            "SHINGO ERGUE UMA SOBRANCELHA",
-            "Nota {nota}/10... Shingo espera mais de você. Tente novamente."
-        )
-    elif nota == 7:
-        return (
-            "neutra",
-            "SHINGO APROVA, COM MODERAÇÃO",
-            "Nota {nota}/10 Shingo reconhece o esforço. É um começo razoável."
-        )
-    elif nota <= 9:
-        return (
-            "elogio",
-            "SHINGO ESTÁ IMPRESSIONADO",
-            "Nota {nota}/10! Shingo reconhece sua sabedoria e o seu bom gosto."
-        )
-    else:  # 10
-        return (
-            "transcendencia",
-            "VOCÊ TRANSCENDEU",
-            "Nota 10/10. Você não apenas leu — você entendeu. Shingo vê em você um igual."
-        )
-
-_SHINGO_IMG_CACHE: dict[str, bytes | None] = {}
-
-def _carregar_imagem_shingo(chave: str) -> bytes | None:
-    """Lê a imagem correspondente de assets/ uma única vez e mantém em cache em memória."""
-    if chave not in _SHINGO_IMG_CACHE:
-        caminho = SHINGO_IMAGENS[chave]
-        if os.path.isfile(caminho):
-            try:
-                with open(caminho, "rb") as f:
-                    _SHINGO_IMG_CACHE[chave] = f.read()
-            except Exception as e:
-                print(f"[MAL Tracker] ⚠️  Não foi possível carregar '{caminho}': {e}")
-                _SHINGO_IMG_CACHE[chave] = None
-        else:
-            print(f"[MAL Tracker] ⚠️  Imagem do Shingo '{caminho}' não encontrada.")
-            _SHINGO_IMG_CACHE[chave] = None
-    return _SHINGO_IMG_CACHE[chave]
-
 
 # ──────────────────────────────────────────────
 #  Persistência — usuários
@@ -413,19 +349,19 @@ def salvar_snapshots_em_lote(
 # (sem terminar o anime/mangá) também conta, não só conclusões.
 
 def carregar_progresso_mensal(username: str, tipo: str) -> dict[str, dict]:
-    """Retorna { item_id: {watched_at, mes_referencia, episodios_mes, capitulos_mes, volumes_mes, completou_mes} }."""
+    """Retorna { item_id: {watched_at, mes_referencia, episodios_mes, capitulos_mes, volumes_mes, completou_mes, duracao_ep_min} }."""
     with sqlite3.connect("usuarios.db") as conn:
         c = conn.cursor()
         c.execute(
             "SELECT item_id, watched_at, mes_referencia, episodios_mes, "
-            "capitulos_mes, volumes_mes, completou_mes "
+            "capitulos_mes, volumes_mes, completou_mes, duracao_ep_min "
             "FROM mal_progresso_mensal WHERE username = ? AND tipo = ?",
             (username, tipo)
         )
         rows = c.fetchall()
 
     resultado: dict[str, dict] = {}
-    for item_id, watched_at, mes_ref, ep_mes, cap_mes, vol_mes, comp_mes in rows:
+    for item_id, watched_at, mes_ref, ep_mes, cap_mes, vol_mes, comp_mes, dur_min in rows:
         resultado[item_id] = {
             "watched_at":     watched_at or "",
             "mes_referencia": mes_ref or "",
@@ -433,12 +369,17 @@ def carregar_progresso_mensal(username: str, tipo: str) -> dict[str, dict]:
             "capitulos_mes":  cap_mes or 0,
             "volumes_mes":    vol_mes or 0,
             "completou_mes":  comp_mes or 0,
+            "duracao_ep_min": dur_min or 0,
         }
     return resultado
 
 
-# [(item_id, watched_at, mes_referencia, episodios_mes, capitulos_mes, volumes_mes, completou_mes), ...]
-ProgressoUpsert = tuple[str, str, str, int, int, int, int]
+# [(item_id, watched_at, mes_referencia, episodios_mes, capitulos_mes, volumes_mes, completou_mes, duracao_ep_min), ...]
+# duracao_ep_min: duração média do episódio em minutos (0 = desconhecida/não aplicável a mangá).
+# Diferente dos outros campos, NÃO é um acumulador mensal — é um atributo do
+# próprio anime, então é sempre sobrescrito com o valor mais recente conhecido
+# (não reinicia quando o mês vira).
+ProgressoUpsert = tuple[str, str, str, int, int, int, int, int]
 
 
 def salvar_progresso_mensal_em_lote(username: str, tipo: str, itens: list[ProgressoUpsert]):
@@ -449,19 +390,20 @@ def salvar_progresso_mensal_em_lote(username: str, tipo: str, itens: list[Progre
             """
             INSERT INTO mal_progresso_mensal
                 (username, tipo, item_id, watched_at, mes_referencia,
-                 episodios_mes, capitulos_mes, volumes_mes, completou_mes)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                 episodios_mes, capitulos_mes, volumes_mes, completou_mes, duracao_ep_min)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(username, tipo, item_id) DO UPDATE SET
                 watched_at     = excluded.watched_at,
                 mes_referencia = excluded.mes_referencia,
                 episodios_mes  = excluded.episodios_mes,
                 capitulos_mes  = excluded.capitulos_mes,
                 volumes_mes    = excluded.volumes_mes,
-                completou_mes  = excluded.completou_mes
+                completou_mes  = excluded.completou_mes,
+                duracao_ep_min = excluded.duracao_ep_min
             """,
             [
-                (username, tipo, item_id, watched_at, mes_ref, ep_mes, cap_mes, vol_mes, comp_mes)
-                for item_id, watched_at, mes_ref, ep_mes, cap_mes, vol_mes, comp_mes in itens
+                (username, tipo, item_id, watched_at, mes_ref, ep_mes, cap_mes, vol_mes, comp_mes, dur_min)
+                for item_id, watched_at, mes_ref, ep_mes, cap_mes, vol_mes, comp_mes, dur_min in itens
             ]
         )
         conn.commit()
@@ -546,32 +488,75 @@ def marcar_inicio_lote_favoritos(quando: datetime):
 
 
 async def buscar_ids_favoritos_jikan(
-    session: aiohttp.ClientSession, username: str
+    session: aiohttp.ClientSession,
+    username: str,
+    tentativas: int = JIKAN_MAX_TENTATIVAS,
 ) -> set[str] | None:
     """
     Consulta a API do Jikan e retorna os anime_ids dos favoritos do usuário.
     Retorna None em caso de erro de rede (para não zerar dados por falha temporária).
     Retorna set vazio se o usuário não tem favoritos ou a lista é privada.
+
+    O Jikan é um proxy comunitário gratuito em cima do MAL e sofre 429
+    (rate limit) e 5xx (instabilidade) com alguma frequência — isso é
+    esperado, não excepcional, então tentamos de novo com backoff em vez
+    de desistir na primeira falha. Um 429 respeita o header Retry-After
+    quando presente.
     """
     url = f"{JIKAN_BASE}/users/{username}/favorites"
-    try:
-        async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
-            if resp.status == 200:
-                data = await resp.json()
-                animes = data.get("data", {}).get("anime", [])
-                return {str(a["mal_id"]) for a in animes if "mal_id" in a}
-            elif resp.status in (403, 404):
-                # Lista privada ou usuário não encontrado — retorna vazio (não é erro)
-                return set()
-            else:
-                print(f"[MAL Tracker] Jikan retornou {resp.status} para '{username}' (favoritos).")
-                return None  # Erro temporário — não atualiza o banco
-    except asyncio.TimeoutError:
-        print(f"[MAL Tracker] Timeout ao buscar favoritos de '{username}'.")
-        return None
-    except Exception as e:
-        print(f"[MAL Tracker] Erro ao buscar favoritos de '{username}': {e}")
-        return None
+
+    for tentativa in range(1, tentativas + 1):
+        espera = 2 * tentativa  # backoff linear simples: 2s, 4s, 6s, 8s...
+
+        try:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=15)) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    animes = data.get("data", {}).get("anime", [])
+                    return {str(a["mal_id"]) for a in animes if "mal_id" in a}
+
+                elif resp.status in (403, 404):
+                    # Lista privada ou usuário não encontrado — não é erro, não insiste
+                    return set()
+
+                elif resp.status == 429:
+                    retry_after = resp.headers.get("Retry-After")
+                    if retry_after:
+                        try:
+                            espera = float(retry_after)
+                        except ValueError:
+                            pass
+                    print(
+                        f"[MAL Tracker] Jikan rate-limited (429) para '{username}' "
+                        f"— tentativa {tentativa}/{tentativas}, aguardando {espera:.1f}s."
+                    )
+
+                elif 500 <= resp.status < 600:
+                    print(
+                        f"[MAL Tracker] Jikan retornou {resp.status} (instável) para '{username}' "
+                        f"— tentativa {tentativa}/{tentativas}, aguardando {espera:.1f}s."
+                    )
+
+                else:
+                    print(f"[MAL Tracker] Jikan retornou {resp.status} para '{username}' (favoritos). Não é recuperável, desistindo.")
+                    return None
+
+        except asyncio.TimeoutError:
+            print(
+                f"[MAL Tracker] Timeout ao buscar favoritos de '{username}' "
+                f"— tentativa {tentativa}/{tentativas}, aguardando {espera:.1f}s."
+            )
+        except Exception as e:
+            print(
+                f"[MAL Tracker] Erro ao buscar favoritos de '{username}': {e} "
+                f"— tentativa {tentativa}/{tentativas}, aguardando {espera:.1f}s."
+            )
+
+        if tentativa < tentativas:
+            await asyncio.sleep(espera)
+
+    print(f"[MAL Tracker] ❌ Desisti de buscar favoritos de '{username}' após {tentativas} tentativa(s) — Jikan seguiu instável.")
+    return None
 
 
 def atualizar_favoritos_db(username: str, ids_favoritos: set[str]):
@@ -636,177 +621,12 @@ def comprimir_capa(img_bytes: bytes, qualidade: int = QUALIDADE_CAPA) -> bytes:
 # ──────────────────────────────────────────────
 #  Geração dos cards visuais (estilo AniList)
 # ──────────────────────────────────────────────
-
-_FONT_DIR = "/usr/share/fonts/truetype/dejavu/"
-
-_BG         = (13, 17, 25)
-_CARD_BG    = (22, 27, 38)
-_ROW_BG     = (28, 34, 48)
-_TEXT_MAIN  = (222, 226, 235)
-_TEXT_MUTED = (135, 143, 160)
-
-_CARD_W    = 780
-_HEADER_H  = 88
-_ROW_H     = 172
-_GAP       = 10
-_PAD       = 16
-
-# Proporção das capas de anime/mangá (largura / altura), igual à usada pelo
-# AniList (80 x 115.97) — retrato, mais alta que larga.
-_COVER_RATIO = 80 / 115.97
-
-# Proporção original das imagens do easter egg do Shingo (2133x1530 px),
-# usada em gerar_imagem_shingo para redimensionar sem distorcer.
-_RAZAO_SHINGO = 2133 / 1530
-
-# Altura-alvo do CARD INTEIRO do easter egg do Shingo (título + subtítulo +
-# texto + imagem + padding) — não da imagem isolada. Escolhida pra ficar no
-# mesmo patamar dos outros cards do mal_tracker (um card de atualização com
-# 2 itens sai com ~474px de altura; o cabeçalho, ~320px). Isso é o que
-# importa de verdade: o Discord limita a altura de exibição de cada anexo, e
-# quando a altura passa desse teto a largura visual encolhe proporcionalmente
-# — foi o que causou o card do Shingo aparecer mais estreito que os outros
-# mesmo com a mesma largura em pixels. A imagem em si é dimensionada para
-# preencher o espaço que sobra depois do texto, então cards com mensagens
-# mais curtas (1 linha) acabam com uma imagem um pouco maior que os com
-# mensagens mais longas (2 linhas) — mas a altura TOTAL do card se mantém
-# igual em qualquer caso.
-_ALVO_ALTURA_CARD_SHINGO = 460
-
-# Fator de supersampling: tudo é desenhado nesta escala e depois reduzido
-# com LANCZOS, o que elimina o serrilhado em círculos, bordas arredondadas e texto.
-_SS = 3
-
-_PLACEHOLDER_COVER  = None
-_PLACEHOLDER_AVATAR = None
-
-
-def _fonte(tamanho: int, negrito: bool = False) -> ImageFont.FreeTypeFont:
-    nome = "DejaVuSans-Bold.ttf" if negrito else "DejaVuSans.ttf"
-    return ImageFont.truetype(_FONT_DIR + nome, tamanho)
-
-
-def _mascara_arredondada(tamanho: tuple[int, int], raio: int) -> Image.Image:
-    mask = Image.new("L", tamanho, 0)
-    ImageDraw.Draw(mask).rounded_rectangle((0, 0, tamanho[0] - 1, tamanho[1] - 1), radius=raio, fill=255)
-    return mask
-
-
-def _mascara_circular(tamanho: tuple[int, int]) -> Image.Image:
-    mask = Image.new("L", tamanho, 0)
-    ImageDraw.Draw(mask).ellipse((0, 0, tamanho[0] - 1, tamanho[1] - 1), fill=255)
-    return mask
-
-
-def _desenhar_icone_status(
-    draw: ImageDraw.ImageDraw,
-    tipo: str,
-    cx: float,
-    cy: float,
-    r: float,
-    cor: tuple[int, int, int],
-):
-    """
-    Desenha um ícone de status como forma vetorial simples, centrado em (cx, cy)
-    com "raio" r. Não depende de nenhuma fonte ter glifos de emoji — a maioria
-    das fontes do sistema (como DejaVu Sans) não tem cobertura de emoji colorido,
-    então desenhar as formas na mão garante que sempre vão aparecer corretamente.
-    """
-    espessura = max(2, int(r * 0.24))
-
-    if tipo == "watching":
-        # Triângulo de "play"
-        draw.polygon(
-            [(cx - r * 0.6, cy - r * 0.85), (cx - r * 0.6, cy + r * 0.85), (cx + r * 0.9, cy)],
-            fill=cor,
-        )
-    elif tipo == "reading":
-        # Livro aberto: retângulo com "lombada" central
-        draw.rounded_rectangle(
-            (cx - r * 0.95, cy - r * 0.7, cx + r * 0.95, cy + r * 0.7),
-            radius=r * 0.18, outline=cor, width=espessura,
-        )
-        draw.line([(cx, cy - r * 0.7), (cx, cy + r * 0.7)], fill=cor, width=espessura)
-    elif tipo == "completed":
-        # Checkmark
-        draw.line(
-            [(cx - r * 0.8, cy + r * 0.05), (cx - r * 0.15, cy + r * 0.7), (cx + r * 0.9, cy - r * 0.7)],
-            fill=cor, width=espessura, joint="curve",
-        )
-    elif tipo == "on_hold":
-        # Duas barras (pausa)
-        largura_barra = max(2, int(r * 0.42))
-        draw.rounded_rectangle(
-            (cx - r * 0.75, cy - r * 0.85, cx - r * 0.75 + largura_barra, cy + r * 0.85),
-            radius=largura_barra * 0.3, fill=cor,
-        )
-        draw.rounded_rectangle(
-            (cx + r * 0.3, cy - r * 0.85, cx + r * 0.3 + largura_barra, cy + r * 0.85),
-            radius=largura_barra * 0.3, fill=cor,
-        )
-    elif tipo == "dropped":
-        # X
-        draw.line([(cx - r * 0.75, cy - r * 0.75), (cx + r * 0.75, cy + r * 0.75)], fill=cor, width=espessura)
-        draw.line([(cx - r * 0.75, cy + r * 0.75), (cx + r * 0.75, cy - r * 0.75)], fill=cor, width=espessura)
-    elif tipo == "plan":
-        # Três linhas (fila / planejado)
-        for dy in (-0.55, 0.0, 0.55):
-            draw.line(
-                [(cx - r * 0.85, cy + r * dy), (cx + r * 0.85, cy + r * dy)],
-                fill=cor, width=max(2, int(r * 0.22)),
-            )
-    elif tipo == "note":
-        # Estrela (mudança de nota)
-        pontos = []
-        for i in range(10):
-            angulo = -math.pi / 2 + i * math.pi / 5
-            raio = r if i % 2 == 0 else r * 0.45
-            pontos.append((cx + raio * math.cos(angulo), cy + raio * math.sin(angulo)))
-        draw.polygon(pontos, fill=cor)
-    else:
-        draw.ellipse((cx - r * 0.6, cy - r * 0.6, cx + r * 0.6, cy + r * 0.6), outline=cor, width=espessura)
-
-
-def _truncar_texto(draw: ImageDraw.ImageDraw, texto: str, fonte: ImageFont.FreeTypeFont, largura_max: int) -> str:
-    if draw.textlength(texto, font=fonte) <= largura_max:
-        return texto
-    while texto and draw.textlength(texto + "…", font=fonte) > largura_max:
-        texto = texto[:-1]
-    return texto + "…"
-
-
-def _placeholder_cover() -> Image.Image:
-    global _PLACEHOLDER_COVER
-    if _PLACEHOLDER_COVER is None:
-        _PLACEHOLDER_COVER = Image.new("RGB", (200, 200), (45, 50, 66))
-    return _PLACEHOLDER_COVER
-
-
-def _placeholder_avatar() -> Image.Image:
-    global _PLACEHOLDER_AVATAR
-    if _PLACEHOLDER_AVATAR is None:
-        _PLACEHOLDER_AVATAR = Image.new("RGB", (150, 150), (60, 66, 84))
-    return _PLACEHOLDER_AVATAR
-
-
-def _abrir_imagem(img_bytes: bytes | None, fallback: Image.Image) -> Image.Image:
-    if not img_bytes:
-        return fallback
-    try:
-        return Image.open(BytesIO(img_bytes)).convert("RGB")
-    except Exception:
-        return fallback
-
-
-def _finalizar_canvas(canvas: Image.Image) -> bytes:
-    """Reduz o canvas supersampleado para o tamanho final (antialiasing) e serializa em PNG."""
-    tamanho_final = (canvas.width // _SS, canvas.height // _SS)
-    canvas = canvas.resize(tamanho_final, Image.LANCZOS)
-    buffer = BytesIO()
-    canvas.save(buffer, format="PNG", optimize=True)
-    buffer.seek(0)
-    return buffer.getvalue()
-
+#
+# As primitivas de desenho compartilhadas (fontes, máscaras, ícones de
+# status, supersampling etc.) vivem em cogs/mal_visual.py — importadas no
+# topo deste arquivo — para que os easter eggs (cogs/mal_easter_eggs.py)
+# usem exatamente o mesmo estilo visual sem depender deste módulo (e
+# vice-versa, evitando import circular).
 
 def gerar_imagem_lote(
     usuario: str,
@@ -969,125 +789,17 @@ def gerar_imagem_cabecalho(
     return _finalizar_canvas(canvas)
 
 
-def _quebrar_texto(draw: ImageDraw.ImageDraw, texto: str, fonte: ImageFont.FreeTypeFont, largura_max: int) -> list[str]:
-    """Quebra `texto` em várias linhas que cabem em `largura_max`, por palavra inteira."""
-    palavras = texto.split()
-    linhas: list[str] = []
-    atual = ""
-    for palavra in palavras:
-        teste = f"{atual} {palavra}".strip()
-        if draw.textlength(teste, font=fonte) <= largura_max:
-            atual = teste
-        else:
-            if atual:
-                linhas.append(atual)
-            atual = palavra
-    if atual:
-        linhas.append(atual)
-    return linhas
-
-
-def gerar_imagem_shingo_texto(
-    usuario: str,
-    nota: int,
-    titulo: str,
-    texto: str,
-) -> bytes:
+def _duracao_min_do_node(node: dict) -> int:
     """
-    Card com a parte textual da reação do Shingo (título + subtítulo +
-    texto), no mesmo estilo visual dos outros cards (fundo escuro, cantos
-    arredondados). Altura ajustada só ao conteúdo — sem imagem, então fica
-    naturalmente curto e não corre risco de esbarrar no teto de altura que
-    o Discord usa pra escalar anexos.
-
-    Mandado como a PRIMEIRA de duas mensagens (ver gerar_imagem_shingo_arte
-    para a segunda) — separar texto e arte em cards distintos evita que um
-    dispute espaço vertical com o outro, então a arte pode ocupar uma altura
-    bem maior sem estourar a altura total segura que mantém a largura de
-    exibição igual à dos outros cards do mal_tracker.
+    Extrai average_episode_duration (segundos, só existe pra anime) de um
+    node da API do MAL e converte pra minutos arredondados. Retorna 0 se
+    ausente/zero (mangá, ou duração desconhecida) — usado pelo /mal_mensal
+    pra normalizar pontuação de episódios por duração real.
     """
-    s = _SS
-    pad, card_w = _PAD * s, _CARD_W * s
-
-    f_titulo = _fonte(30 * s, negrito=True)
-    f_sub    = _fonte(19 * s)
-    f_texto  = _fonte(21 * s)
-
-    medidor = ImageDraw.Draw(Image.new("RGB", (card_w, 10)))
-
-    subtitulo = f"@{usuario}  ·  Watashi wa Shingo  ·  Nota {nota}/10"
-    largura_texto_max = card_w - pad * 4
-    linhas_texto = _quebrar_texto(medidor, texto, f_texto, largura_texto_max)
-
-    titulo_y = pad + 10 * s
-    sub_y    = titulo_y + 42 * s
-    texto_y  = sub_y + 36 * s
-    linha_h  = 30 * s
-    altura   = texto_y + len(linhas_texto) * linha_h + pad
-
-    canvas = Image.new("RGB", (card_w, altura), _BG)
-    draw = ImageDraw.Draw(canvas)
-    draw.rounded_rectangle((0, 0, card_w - 1, altura - 1), radius=14 * s, fill=_CARD_BG)
-
-    titulo_w = draw.textlength(titulo, font=f_titulo)
-    draw.text(((card_w - titulo_w) // 2, titulo_y), titulo, font=f_titulo, fill=(255, 255, 255))
-
-    sub_w = draw.textlength(subtitulo, font=f_sub)
-    draw.text(((card_w - sub_w) // 2, sub_y), subtitulo, font=f_sub, fill=_TEXT_MUTED)
-
-    y_linha = texto_y
-    for linha in linhas_texto:
-        linha_w = draw.textlength(linha, font=f_texto)
-        draw.text(((card_w - linha_w) // 2, y_linha), linha, font=f_texto, fill=_TEXT_MAIN)
-        y_linha += linha_h
-
-    return _finalizar_canvas(canvas)
-
-
-def gerar_imagem_shingo_arte(
-    imagem_bytes: bytes | None,
-    cor_destaque: tuple[int, int, int] = COR_SHINGO_BORDA,
-) -> bytes:
-    """
-    Card com só a arte do Shingo (shingo X.jpg), no mesmo estilo visual dos
-    outros cards — fundo escuro, cantos arredondados, imagem centralizada
-    com borda colorida. Mandado como a SEGUNDA mensagem, depois do card de
-    texto (gerar_imagem_shingo_texto).
-
-    Como não compete por espaço com título/subtítulo/texto, a imagem pode
-    usar quase toda a altura-alvo do card (_ALVO_ALTURA_CARD_SHINGO) pra si,
-    ficando bem maior que na versão anterior (card único) — mantendo a
-    proporção original (2133x1530 ≈ 1.394:1) sem distorcer.
-    """
-    s = _SS
-    pad, card_w = _PAD * s, _CARD_W * s
-
-    altura_total_alvo = _ALVO_ALTURA_CARD_SHINGO * s
-    altura_minima = 160 * s
-    altura_img = max(altura_minima, altura_total_alvo - pad * 2)
-    largura_img = int(altura_img * _RAZAO_SHINGO)
-    largura_max_disponivel = card_w - pad * 2
-    if largura_img > largura_max_disponivel:
-        largura_img = largura_max_disponivel
-        altura_img = int(largura_img / _RAZAO_SHINGO)
-
-    altura = altura_img + pad * 2
-
-    canvas = Image.new("RGB", (card_w, altura), _BG)
-    draw = ImageDraw.Draw(canvas)
-    draw.rounded_rectangle((0, 0, card_w - 1, altura - 1), radius=14 * s, fill=_CARD_BG)
-
-    icone_img = _abrir_imagem(imagem_bytes, _placeholder_avatar())
-    icone = ImageOps.fit(icone_img, (largura_img, altura_img))
-    icone_x = (card_w - largura_img) // 2
-    icone_y = pad
-    canvas.paste(icone, (icone_x, icone_y), _mascara_arredondada((largura_img, altura_img), 16 * s))
-    draw.rounded_rectangle(
-        (icone_x, icone_y, icone_x + largura_img, icone_y + altura_img),
-        radius=16 * s, outline=cor_destaque, width=3 * s
-    )
-
-    return _finalizar_canvas(canvas)
+    segundos = node.get("average_episode_duration")
+    if not segundos:
+        return 0
+    return round(segundos / 60)
 
 
 # ──────────────────────────────────────────────
@@ -1107,11 +819,15 @@ class MalTrackerCog(commands.Cog):
         # Populado UMA VEZ por usuário antes de processar qualquer guild,
         # para que guilds múltiplas recebam exatamente o mesmo conjunto de mudanças.
         self._cache_mudancas_ciclo: dict[str, dict[str, list[dict]]] = {}
-        # Cache de eventos especiais do Shingo detectados no ciclo atual:
-        # { username: [nota1, nota2, ...] } — normalmente terá no máximo 1 nota,
-        # mas fica como lista para suportar o caso raro de reset + reconclusão
-        # do mangá no mesmo ciclo.
-        self._cache_eventos_shingo: dict[str, list[int]] = {}
+        # Manager central de easter eggs (ver cogs/mal_easter_eggs.py). O cog
+        # não conhece nenhum easter egg específico — só delega a detecção e
+        # o envio a esta instância, que despacha para quem estiver registrado.
+        self._easter_eggs = EasterEggManager()
+        # Cache de eventos de easter egg detectados no ciclo atual:
+        # { username: [EventoEasterEgg, ...] } — normalmente terá no máximo
+        # 1 evento por usuário, mas fica como lista para suportar múltiplos
+        # easter eggs (ou o mesmo disparando mais de uma vez) no mesmo ciclo.
+        self._cache_eventos_easter_eggs: dict[str, list[EventoEasterEgg]] = {}
         self.monitorar_loop.start()
         self.favoritos_semanal_loop.start()
 
@@ -1149,7 +865,9 @@ class MalTrackerCog(commands.Cog):
         url = f"{MAL_API_BASE}/users/{username}/{endpoint}"
         # main_picture é necessário para gerar os cards com a capa do anime/mangá;
         # num_episodes/num_chapters é o total da obra, usado para exibir "EP 15 de 24".
-        campos = "list_status,main_picture,num_episodes" if tipo == "anime" else "list_status,main_picture,num_chapters,num_volumes"
+        # average_episode_duration (segundos) só existe pra anime — usado pelo
+        # /mal_mensal pra normalizar a pontuação de episódios por duração real.
+        campos = "list_status,main_picture,num_episodes,average_episode_duration" if tipo == "anime" else "list_status,main_picture,num_chapters,num_volumes"
         params = {
             "fields": campos,
             "sort":   "list_updated_at",
@@ -1214,8 +932,10 @@ class MalTrackerCog(commands.Cog):
             # Baseline zerado na tabela de progresso mensal — o histórico de
             # antes de o bot existir não conta como progresso "do mês"; o
             # loop horário é quem vai preencher os acumuladores dali pra frente.
+            # duracao_ep_min já entra preenchida (quando disponível) mesmo no
+            # baseline — não é um acumulador, é só um atributo do anime.
             upserts_progresso = [
-                (str(item["node"]["id"]), "", "", 0, 0, 0, 0)
+                (str(item["node"]["id"]), "", "", 0, 0, 0, 0, _duracao_min_do_node(item["node"]))
                 for item in pagina
             ]
             salvar_progresso_mensal_em_lote(username, tipo, upserts_progresso)
@@ -1286,7 +1006,8 @@ class MalTrackerCog(commands.Cog):
                         salvar_snapshots_em_lote(username, tipo, upserts)
 
                         upserts_progresso = [
-                            (str(item["node"]["id"]), "", "", 0, 0, 0, 0) for item in faltantes
+                            (str(item["node"]["id"]), "", "", 0, 0, 0, 0, _duracao_min_do_node(item["node"]))
+                            for item in faltantes
                         ]
                         salvar_progresso_mensal_em_lote(username, tipo, upserts_progresso)
 
@@ -1526,7 +1247,7 @@ class MalTrackerCog(commands.Cog):
         status_permitidos: list[str],              # filtros já resolvidos pela guild
         primeira_vez: bool = False,                # True = usuário sem snapshots ainda
         username: str = "",                        # apenas para contexto nos logs
-    ) -> tuple[list[dict], list[tuple[str, str, str]], list[tuple[str, str, str, int, int, int, int]], list[int]]:
+    ) -> tuple[list[dict], list[tuple[str, str, str]], list[tuple[str, str, str, int, int, int, int]], list[EventoEasterEgg]]:
         """
         Compara itens da API contra snapshots do banco.
 
@@ -1534,13 +1255,16 @@ class MalTrackerCog(commands.Cog):
           - mudanças detectadas (para o relatório desta guild)
           - upserts de mal_snapshots a persistir
           - upserts de mal_progresso_mensal a persistir
-          - notas que dispararam o easter egg do Shingo neste lote (normalmente
-            0 ou 1 elemento; só populado quando tipo == "manga")
+          - eventos de easter egg (ver EasterEggManager, em
+            cogs/mal_easter_eggs.py) disparados neste lote — cada easter
+            egg registrado decide por conta própria, a partir do snapshot
+            anterior x atual de cada item, se deve disparar. Este método
+            não conhece nenhum easter egg específico; só delega a decisão.
         """
         novas:             list[dict]                 = []
         upserts:            list[tuple[str, str, str]] = []
         upserts_progresso:  list[tuple[str, str, str, int, int, int, int]] = []
-        eventos_shingo:      list[int]                 = []
+        eventos_easter_egg:  list[EventoEasterEgg]      = []
 
         for item in itens:
             item_id    = str(item["node"]["id"])
@@ -1555,8 +1279,15 @@ class MalTrackerCog(commands.Cog):
             updated_at = status.get("updated_at", "")
             status_val = status.get("status", "")
 
+            # Duração do episódio (minutos) — só existe pra anime. Não é um
+            # acumulador mensal, então sempre usa o valor mais recente vindo
+            # da API; se por algum motivo a API não trouxer desta vez, cai
+            # pro último valor já conhecido em vez de zerar.
             registro_anterior     = snapshots_db.get(item_id)
             registro_progresso_anterior = progresso_db.get(item_id)
+            duracao_min = _duracao_min_do_node(item["node"]) if tipo == "anime" else 0
+            if not duracao_min and registro_progresso_anterior:
+                duracao_min = registro_progresso_anterior.get("duracao_ep_min", 0)
 
             # ── Item novo (usuário com sync completo, mas item não estava na lista antes)
             if registro_anterior is None:
@@ -1564,7 +1295,7 @@ class MalTrackerCog(commands.Cog):
 
                 if primeira_vez:
                     # Baseline da sincronização inicial — não conta como progresso do mês.
-                    upserts_progresso.append((item_id, "", "", 0, 0, 0, 0))
+                    upserts_progresso.append((item_id, "", "", 0, 0, 0, 0, duracao_min))
                     continue
 
                 # Item genuinamente novo na lista (já sincronizada) — o "anterior"
@@ -1581,14 +1312,14 @@ class MalTrackerCog(commands.Cog):
                 watched_at, mes_ref, ep_mes, cap_mes, vol_mes, comp_mes = self._atualizar_progresso_mensal(
                     registro_progresso_anterior, ep_atual, cap_atual, vol_atual, completou_agora, updated_at
                 )
-                upserts_progresso.append((item_id, watched_at, mes_ref, ep_mes, cap_mes, vol_mes, comp_mes))
+                upserts_progresso.append((item_id, watched_at, mes_ref, ep_mes, cap_mes, vol_mes, comp_mes, duracao_min))
 
                 # Nota: itens "novos" pro banco (primeira vez que aparecem nos 50
-                # mais recentes) não disparam o evento do Shingo — não temos
-                # como confirmar que a transição pra "completed" aconteceu
+                # mais recentes) não são avaliados por nenhum easter egg — não
+                # temos como confirmar que a transição pra "completed" aconteceu
                 # agora e não há muito tempo atrás, então preferimos não arriscar
-                # um falso disparo. O evento só dispara na comparação de
-                # snapshot anterior x atual, mais abaixo.
+                # um falso disparo. Os easter eggs só são avaliados na
+                # comparação de snapshot anterior x atual, mais abaixo.
 
                 if not updated_at:
                     print(f"[MAL Tracker] [{username}] '{titulo}' ({tipo}/{item_id}) é novo na lista mas sem updated_at — não reportado.")
@@ -1648,26 +1379,24 @@ class MalTrackerCog(commands.Cog):
                 delta_vol = atu.get("num_volumes_read", 0) - ant.get("num_volumes_read", 0)
             completou_agora = atu.get("status") == "completed" and ant.get("status") != "completed"
 
-            # 🎉 Easter egg do Shingo: só dispara na transição REAL pra
-            # "completed" de Watashi wa Shingo (id 24646), com base na
-            # comparação snapshot anterior x atual — evita falso positivo em
-            # itens "novos" pro banco (onde não sabemos o estado real
-            # anterior) e em relidas/mudanças de nota sem trocar status.
-            # Roda independente dos filtros de status da guild (assim como o
-            # progresso mensal): é uma reação do bot ao evento em si, não uma
-            # notificação de atualização de lista.
-            if tipo == "manga" and item_id == SHINGO_MANGA_ID and completou_agora:
-                nota_shingo = atu.get("score") or 0
-                if nota_shingo > 0:
-                    eventos_shingo.append(nota_shingo)
-                    print(f"[MAL Tracker] [{username}] 🎉 Evento Shingo disparado! nota={nota_shingo}")
-                else:
-                    print(f"[MAL Tracker] [{username}] 📖 completou Watashi wa Shingo sem nota — evento Shingo não disparado (aguardando nota).")
+            # 🎉 Easter eggs: cada um registrado em EasterEggManager decide,
+            # a partir da comparação snapshot anterior x atual deste item
+            # específico, se deve disparar — este método não sabe (nem
+            # precisa saber) que easter eggs existem. Isso evita falso
+            # positivo em itens "novos" pro banco (onde não sabemos o estado
+            # real anterior) e é avaliado independente dos filtros de status
+            # da guild (assim como o progresso mensal): é uma reação do bot
+            # ao evento em si, não uma notificação de atualização de lista.
+            # Para adicionar um novo easter egg, ver cogs/mal_easter_eggs.py
+            # — nada aqui precisa mudar.
+            eventos_easter_egg.extend(
+                self._easter_eggs.detectar(tipo, item_id, ant, atu, completou_agora, username=username)
+            )
 
             watched_at, mes_ref, ep_mes, cap_mes, vol_mes, comp_mes = self._atualizar_progresso_mensal(
                 registro_progresso_anterior, delta_ep, delta_cap, delta_vol, completou_agora, updated_at
             )
-            upserts_progresso.append((item_id, watched_at, mes_ref, ep_mes, cap_mes, vol_mes, comp_mes))
+            upserts_progresso.append((item_id, watched_at, mes_ref, ep_mes, cap_mes, vol_mes, comp_mes, duracao_min))
 
             if so_nota or status_val in status_permitidos:
                 nota_anterior = ant.get("score") if so_nota else None
@@ -1686,7 +1415,7 @@ class MalTrackerCog(commands.Cog):
                     f"mas está fora dos status permitidos nesta checagem — NÃO reportado (snapshot atualizado no banco)."
                 )
 
-        return novas, upserts, upserts_progresso, eventos_shingo
+        return novas, upserts, upserts_progresso, eventos_easter_egg
 
     def _montar_entrada(
         self,
@@ -1723,14 +1452,15 @@ class MalTrackerCog(commands.Cog):
 
     async def _detectar_mudancas_usuario(
         self, username: str
-    ) -> tuple[dict[str, list[dict]], list[int]]:
+    ) -> tuple[dict[str, list[dict]], list[EventoEasterEgg]]:
         """
         Busca os itens recentes de um usuário, compara com os snapshots do banco
-        e persiste as atualizações. Retorna (mudanças brutas, eventos_shingo):
+        e persiste as atualizações. Retorna (mudanças brutas, eventos_easter_egg):
           - mudanças brutas, sem filtro de guild, para que cada guild aplique
             seus próprios filtros depois;
-          - notas que dispararam o easter egg do Shingo neste ciclo (lista de
-            inteiros, normalmente vazia ou com um único elemento).
+          - eventos de easter egg (ver EasterEggManager, cogs/mal_easter_eggs.py)
+            disparados neste ciclo — cada easter egg registrado decide por
+            conta própria se aplica a anime, mangá ou ambos.
 
         Chamado UMA VEZ por usuário por ciclo — garante que todas as guilds
         recebem o mesmo conjunto de mudanças/eventos antes de qualquer snapshot
@@ -1757,10 +1487,10 @@ class MalTrackerCog(commands.Cog):
         # por guild depois em _filtrar_mudancas_para_guild.
         todos_status = TODOS_STATUS_ANIME + TODOS_STATUS_MANGA
 
-        novas_anime, upserts_anime, upserts_progresso_anime, _ = self._processar_itens(
+        novas_anime, upserts_anime, upserts_progresso_anime, eventos_anime = self._processar_itens(
             itens_anime or [], snaps_anime, progresso_anime, "anime", todos_status, username=username
         )
-        novas_manga, upserts_manga, upserts_progresso_manga, eventos_shingo = self._processar_itens(
+        novas_manga, upserts_manga, upserts_progresso_manga, eventos_manga = self._processar_itens(
             itens_manga or [], snaps_manga, progresso_manga, "manga", todos_status, username=username
         )
 
@@ -1779,7 +1509,8 @@ class MalTrackerCog(commands.Cog):
         if total:
             print(f"[MAL Tracker] '{username}': {len(novas_anime)} anime, {len(novas_manga)} mangá detectados.")
 
-        return {"anime": novas_anime, "manga": novas_manga}, eventos_shingo
+        eventos_easter_egg = eventos_anime + eventos_manga
+        return {"anime": novas_anime, "manga": novas_manga}, eventos_easter_egg
 
     def _filtrar_mudancas_para_guild(
         self,
@@ -1987,51 +1718,6 @@ class MalTrackerCog(commands.Cog):
 
         return total_itens
 
-    async def _enviar_evento_shingo(self, canal: discord.TextChannel, usuario: str, nota: int):
-        """
-        Envia a reação especial do Shingo quando alguém completa 'Watashi wa
-        Shingo' (MAL id 24646), como DUAS mensagens em sequência — mesmo
-        esquema visual do resto do mal_tracker (PNGs gerados com Pillow,
-        anexo puro, sem embed):
-
-          1. Card de texto (título + subtítulo + reação do Shingo).
-          2. Card com a arte (shingo X.jpg) em tamanho maior.
-
-        Separar texto e arte evita que um dispute altura com o outro — a
-        arte pode ocupar uma altura bem maior sem estourar o teto que o
-        Discord usa pra escalar anexos (o que, quando os dois dividiam um
-        único card, deixava a imagem menor pra caber o texto).
-        """
-        chave, titulo, texto_modelo = _shingo_reacao(nota)
-        img_bytes = _carregar_imagem_shingo(chave)
-        texto = texto_modelo.format(nota=nota)
-
-        try:
-            png_texto = gerar_imagem_shingo_texto(usuario, nota, titulo, texto)
-            png_arte  = gerar_imagem_shingo_arte(img_bytes)
-        except Exception as e:
-            print(f"[MAL Tracker] ❌ Erro ao gerar imagens do evento Shingo de '{usuario}': {e}")
-            traceback.print_exc()
-            return
-
-        buffer_texto = BytesIO(png_texto)
-        buffer_texto.seek(0)
-        try:
-            await canal.send(file=discord.File(buffer_texto, filename=f"shingo_texto_{usuario}.png"))
-        except Exception as e:
-            print(f"[MAL Tracker] ❌ Erro ao enviar card de texto do evento Shingo de '{usuario}': {e}")
-            traceback.print_exc()
-
-        await asyncio.sleep(0.3)
-
-        buffer_arte = BytesIO(png_arte)
-        buffer_arte.seek(0)
-        try:
-            await canal.send(file=discord.File(buffer_arte, filename=f"shingo_arte_{usuario}.png"))
-        except Exception as e:
-            print(f"[MAL Tracker] ❌ Erro ao enviar card de arte do evento Shingo de '{usuario}': {e}")
-            traceback.print_exc()
-
     # ──────────────────────────────────────────
     #  Loop principal
     # ──────────────────────────────────────────
@@ -2054,17 +1740,17 @@ class MalTrackerCog(commands.Cog):
         # "sumindo" do relatório sem nenhum erro visível.
         todos_usuarios = carregar_todos_usuarios()
         self._cache_mudancas_ciclo = {}
-        self._cache_eventos_shingo = {}
+        self._cache_eventos_easter_eggs = {}
         for username in todos_usuarios:
             try:
                 mudancas, eventos = await self._detectar_mudancas_usuario(username)
                 self._cache_mudancas_ciclo[username] = mudancas
-                self._cache_eventos_shingo[username]  = eventos
+                self._cache_eventos_easter_eggs[username] = eventos
             except Exception as e:
                 print(f"[MAL Tracker] ❌ Erro ao detectar mudanças de '{username}' — usuário pulado neste ciclo: {e}")
                 traceback.print_exc()
                 self._cache_mudancas_ciclo[username] = {}
-                self._cache_eventos_shingo[username]  = []
+                self._cache_eventos_easter_eggs[username] = []
 
             # Favoritos NÃO são mais sincronizados aqui — isso rodava a cada
             # ciclo horário pra TODOS os usuários (o cooldown individual só
@@ -2096,13 +1782,12 @@ class MalTrackerCog(commands.Cog):
                 else:
                     print(f"[MAL Tracker] Guild '{guild.name}': nenhuma atualização.")
 
-                # Eventos especiais do Shingo — disparam independente dos
-                # filtros de status da guild, em todo servidor onde o usuário
-                # completado estiver monitorado.
+                # Easter eggs (ver cogs/mal_easter_eggs.py) — disparam
+                # independente dos filtros de status da guild, em todo
+                # servidor onde o usuário estiver monitorado.
                 for usuario in carregar_usuarios(guild.id):
-                    for nota in self._cache_eventos_shingo.get(usuario, []):
-                        await self._enviar_evento_shingo(canal, usuario, nota)
-                        await asyncio.sleep(0.3)
+                    for evento in self._cache_eventos_easter_eggs.get(usuario, []):
+                        await self._easter_eggs.enviar(canal, evento)
             except Exception as e:
                 print(f"[MAL Tracker] ❌ Erro ao processar guild '{guild.name}': {e}")
                 traceback.print_exc()
@@ -2168,18 +1853,31 @@ class MalTrackerCog(commands.Cog):
         print(f"[MAL Tracker] 🌟 Iniciando sincronização SEMANAL de favoritos ({len(todos_usuarios)} usuário(s))...")
 
         sucesso = 0
+        falhas = 0
         for username in todos_usuarios:
             try:
                 # forcar=True: o cooldown de 7 dias já foi resolvido no nível
                 # do lote acima: se a rodada disparou, todo mundo é sincronizado.
+                antes = carregar_ultima_sync_favoritos(username)
                 await self._sincronizar_favoritos_usuario(username, forcar=True)
-                sucesso += 1
+                depois = carregar_ultima_sync_favoritos(username)
+                if depois != antes:
+                    sucesso += 1
+                else:
+                    falhas += 1
             except Exception as e:
+                falhas += 1
                 print(f"[MAL Tracker] ❌ Erro ao sincronizar favoritos de '{username}': {e}")
                 traceback.print_exc()
-            await asyncio.sleep(0.5)  # respeita rate limit do Jikan
+            # Ver PAUSA_JIKAN: 0.5s aqui equivalia a 120 req/min, o dobro do
+            # limite de 60/min do Jikan — provável causa de instabilidade
+            # persistente conforme a base de usuários cresce.
+            await asyncio.sleep(PAUSA_JIKAN)
 
-        print(f"[MAL Tracker] ✅ Sincronização semanal de favoritos concluída ({sucesso}/{len(todos_usuarios)} sem erro).")
+        print(
+            f"[MAL Tracker] ✅ Sincronização semanal de favoritos concluída "
+            f"({sucesso}/{len(todos_usuarios)} sem erro, {falhas} falha(s) — ver log acima)."
+        )
 
     @favoritos_semanal_loop.before_loop
     async def antes_do_loop_favoritos(self):
@@ -2441,14 +2139,32 @@ class MalTrackerCog(commands.Cog):
                 await interaction.followup.send("📋 Nenhum usuário monitorado nesta guild.", ephemeral=True)
                 return
 
+        falhas = []
         for u in alvos:
+            antes = carregar_ultima_sync_favoritos(u)
             await self._sincronizar_favoritos_usuario(u, forcar=True)
-            await asyncio.sleep(0.5)  # respeita rate limit do Jikan
+            depois = carregar_ultima_sync_favoritos(u)
+            if depois == antes:
+                falhas.append(u)
+            # Ver PAUSA_JIKAN — mesma lógica do loop semanal: 0.5s excedia
+            # o limite de 60 req/min do Jikan.
+            await asyncio.sleep(PAUSA_JIKAN)
 
         if len(alvos) == 1:
-            await interaction.followup.send(f"✅ Favoritos de `{alvos[0]}` atualizados.", ephemeral=True)
+            if falhas:
+                await interaction.followup.send(
+                    f"❌ Não consegui atualizar os favoritos de `{alvos[0]}` — o Jikan seguiu instável mesmo "
+                    f"após {JIKAN_MAX_TENTATIVAS} tentativas. Veja o console para detalhes e tente de novo mais tarde.",
+                    ephemeral=True
+                )
+            else:
+                await interaction.followup.send(f"✅ Favoritos de `{alvos[0]}` atualizados.", ephemeral=True)
         else:
-            await interaction.followup.send(f"✅ Favoritos de **{len(alvos)}** usuário(s) atualizados.", ephemeral=True)
+            sucesso = len(alvos) - len(falhas)
+            msg = f"✅ Favoritos de **{sucesso}/{len(alvos)}** usuário(s) atualizados."
+            if falhas:
+                msg += f"\n⚠️ Falharam (Jikan instável): {', '.join(f'`{u}`' for u in falhas)}"
+            await interaction.followup.send(msg, ephemeral=True)
 
         print(f"[MAL Tracker] {interaction.user} forçou sync de favoritos: {', '.join(alvos)}.")
 

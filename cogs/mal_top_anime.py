@@ -16,7 +16,7 @@ BRASILIA = timezone(timedelta(hours=-3))
 PONTOS_TOP = 0.2         # pontos por aparecer nos favoritos do MAL de um membro
 MIN_MEMBROS = 5         # mínimo de membros que assistiram p/ entrar na média
 TOP_SERVIDOR_SIZE = 50  # quantos animes compõem o ranking total
-PAGE_SIZE = 10           # itens exibidos por página
+PAGE_SIZE = 10           # itens exibidos por página (máx. 10 embeds por mensagem no Discord)
 
 
 # ──────────────────────────────────────────────────────────────────
@@ -66,6 +66,7 @@ def calcular_ranking(todos_snapshots: dict[str, list[dict]]) -> list[dict]:
                 "item_id": item_id,
                 "pontos_top": 0,
                 "notas": [],
+                "notas_por_membro": {},
                 "membros_assistiram": 0,
                 "membros_no_top": [],
             }
@@ -84,6 +85,7 @@ def calcular_ranking(todos_snapshots: dict[str, list[dict]]) -> list[dict]:
 
             if score > 0:
                 entrada["notas"].append(score)
+                entrada["notas_por_membro"][username] = score
 
             if item_id in top_ids:
                 entrada["pontos_top"] += PONTOS_TOP
@@ -107,7 +109,7 @@ def calcular_ranking(todos_snapshots: dict[str, list[dict]]) -> list[dict]:
 
 
 # ──────────────────────────────────────────────────────────────────
-#  Busca títulos na API do MAL
+#  Busca títulos e capas na API do MAL (com fallback no AniList)
 # ──────────────────────────────────────────────────────────────────
 
 ANILIST_API = "https://graphql.anilist.co"
@@ -221,7 +223,7 @@ async def buscar_titulos_mal(
 
 
 # ──────────────────────────────────────────────────────────────────
-#  Montagem de embed por página
+#  Montagem do embed por página
 # ──────────────────────────────────────────────────────────────────
 
 def build_embed(
@@ -237,10 +239,8 @@ def build_embed(
     end = start + PAGE_SIZE
     itens_pagina = ranking[start:end]
 
-    medalhas = {1: "🥇", 2: "🥈", 3: "🥉"}
-
     embed = discord.Embed(
-        title="🏆 Top do Servidor — MyAnimeList",
+        title="Top do Servidor — MyAnimeList",
         description=f"Baseado em **{num_usuarios}** usuário(s) · {agora}",
         color=0x2E51A2,
     )
@@ -248,8 +248,8 @@ def build_embed(
         url="https://image.myanimelist.net/ui/OK6W_koKDTOqqqLDbIoPAiC8a86sHufn_jOI-JGtoCQ"
     )
 
-    for entry in itens_pagina:
-        pos = ranking.index(entry) + 1
+    for i, entry in enumerate(itens_pagina):
+        pos = start + i + 1
         item_id = entry["item_id"]
         info = titulos.get(item_id, {})
         titulo = info.get("title", f"Anime #{item_id}")
@@ -261,25 +261,21 @@ def build_embed(
         membros_no_top = entry["membros_no_top"]
         total = entry["pontuacao_total"]
 
-        prefixo = medalhas.get(pos, f"#{pos}")
-
-        # Linha 1: posição + título linkado
-        # Linhas seguintes: detalhes
-        linhas = [f"**{prefixo}**  [{titulo}]({url})"]
+        linhas = [f"**#{pos}**  [{titulo}]({url})"]
 
         if media_srv > 0:
-            linhas.append(f"📊 Média servidor: **{media_srv:.2f}/10** ({membros} membros)")
+            linhas.append(f"Média servidor: **{media_srv:.2f}/10** ({membros} membros)")
         else:
-            linhas.append(f"👥 {membros} membro(s) assistiram")
+            linhas.append(f"{membros} membro(s) assistiram")
 
         if pontos_top > 0:
             tops_count = int(round(pontos_top / PONTOS_TOP))
             nomes = ", ".join(f"`{u}`" for u in membros_no_top[:5])
             if len(membros_no_top) > 5:
                 nomes += f" +{len(membros_no_top) - 5}"
-            linhas.append(f"🌟 Favorito de: **{tops_count}** membro(s): {nomes}")
+            linhas.append(f"Favorito de **{tops_count}** membro(s): {nomes}")
 
-        linhas.append(f"🧮 Total: **{total:.1f} pts**")
+        linhas.append(f"Total: **{total:.1f} pts**")
 
         embed.add_field(
             name="\u200b",
@@ -289,11 +285,88 @@ def build_embed(
 
     embed.set_footer(
         text=(
-            f"Página {page + 1}/{total_pages} · "
-            f"Média = mín. {MIN_MEMBROS} membros com nota"
+            f"Página {page + 1}/{total_pages} · Média = mín. {MIN_MEMBROS} membros com nota · "
+            f"Selecione um anime abaixo pra ver as notas de cada membro"
         )
     )
     return embed
+
+
+# ──────────────────────────────────────────────────────────────────
+#  Select — ver as notas de cada membro para um anime específico
+# ──────────────────────────────────────────────────────────────────
+
+class AnimeSelect(discord.ui.Select):
+    """
+    Dropdown com os animes da página atual. Ao selecionar um, mostra
+    (em mensagem privada) todos os membros que deram nota para aquele
+    anime, ordenados da nota mais baixa pra mais alta — pra achar rápido
+    quem "deu nota baixa pra um anime bom".
+    """
+
+    def __init__(self, ranking_view: "RankingView"):
+        super().__init__(
+            placeholder="Ver notas de um anime desta página...",
+            min_values=1,
+            max_values=1,
+            options=[discord.SelectOption(label="Carregando...", value="_none")],
+        )
+        self.ranking_view = ranking_view
+
+    def atualizar_opcoes(self):
+        start = self.ranking_view.page * PAGE_SIZE
+        end = start + PAGE_SIZE
+        itens = self.ranking_view.ranking[start:end]
+
+        if not itens:
+            self.options = [discord.SelectOption(label="Nenhum anime nesta página", value="_none")]
+            self.disabled = True
+            return
+
+        opcoes = []
+        for entry in itens:
+            item_id = entry["item_id"]
+            titulo = self.ranking_view.titulos.get(item_id, {}).get("title", f"Anime #{item_id}")
+            opcoes.append(discord.SelectOption(label=titulo[:100], value=item_id))
+
+        self.options = opcoes
+        self.disabled = False
+
+    async def callback(self, interaction: discord.Interaction):
+        item_id = self.values[0]
+
+        if item_id == "_none":
+            await interaction.response.send_message("Nenhum anime disponível.", ephemeral=True)
+            return
+
+        entry = next((e for e in self.ranking_view.ranking if e["item_id"] == item_id), None)
+        if not entry:
+            await interaction.response.send_message("Anime não encontrado no ranking.", ephemeral=True)
+            return
+
+        titulo = self.ranking_view.titulos.get(item_id, {}).get("title", f"Anime #{item_id}")
+        notas_por_membro = entry.get("notas_por_membro", {})
+
+        if not notas_por_membro:
+            await interaction.response.send_message(
+                f"Nenhum membro deu nota para **{titulo}**.", ephemeral=True
+            )
+            return
+
+        linhas = [
+            f"`{username}` — **{nota}/10**"
+            for username, nota in sorted(notas_por_membro.items(), key=lambda x: x[1])
+        ]
+
+        embed = discord.Embed(
+            title=f"Notas — {titulo}",
+            url=f"https://myanimelist.net/anime/{item_id}",
+            description="\n".join(linhas),
+            color=0x2E51A2,
+        )
+        embed.set_footer(text="Ordenado da nota mais baixa para a mais alta")
+
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
 # ──────────────────────────────────────────────────────────────────
@@ -315,6 +388,11 @@ class RankingView(discord.ui.View):
         self.autor_id = autor_id
         self.page = 0
         self.total_pages = (len(ranking) + PAGE_SIZE - 1) // PAGE_SIZE
+
+        # Rótulo do botão "última página" mostra o total real de páginas,
+        # deixando a navegação toda numa linha só: 1 < > N Notas
+        self.btn_ultima.label = str(self.total_pages)
+
         self._atualizar_botoes()
 
     def _atualizar_botoes(self):
@@ -332,13 +410,13 @@ class RankingView(discord.ui.View):
     async def _checar_autor(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.autor_id:
             await interaction.response.send_message(
-                "❌ Apenas quem usou o comando pode navegar nas páginas.",
+                "Apenas quem usou o comando pode navegar nas páginas.",
                 ephemeral=True,
             )
             return False
         return True
 
-    @discord.ui.button(label="⏮", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(label="1", style=discord.ButtonStyle.secondary, row=0)
     async def btn_primeira(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await self._checar_autor(interaction):
             return
@@ -346,7 +424,7 @@ class RankingView(discord.ui.View):
         self._atualizar_botoes()
         await interaction.response.edit_message(embed=self.embed_atual(), view=self)
 
-    @discord.ui.button(label="◀", style=discord.ButtonStyle.primary)
+    @discord.ui.button(label="<", style=discord.ButtonStyle.primary, row=0)
     async def btn_anterior(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await self._checar_autor(interaction):
             return
@@ -354,7 +432,7 @@ class RankingView(discord.ui.View):
         self._atualizar_botoes()
         await interaction.response.edit_message(embed=self.embed_atual(), view=self)
 
-    @discord.ui.button(label="▶", style=discord.ButtonStyle.primary)
+    @discord.ui.button(label=">", style=discord.ButtonStyle.primary, row=0)
     async def btn_proxima(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await self._checar_autor(interaction):
             return
@@ -362,13 +440,29 @@ class RankingView(discord.ui.View):
         self._atualizar_botoes()
         await interaction.response.edit_message(embed=self.embed_atual(), view=self)
 
-    @discord.ui.button(label="⏭", style=discord.ButtonStyle.secondary)
+    @discord.ui.button(label="Última", style=discord.ButtonStyle.secondary, row=0)
     async def btn_ultima(self, interaction: discord.Interaction, button: discord.ui.Button):
         if not await self._checar_autor(interaction):
             return
         self.page = self.total_pages - 1
         self._atualizar_botoes()
         await interaction.response.edit_message(embed=self.embed_atual(), view=self)
+
+    @discord.ui.button(label="Notas", style=discord.ButtonStyle.secondary, row=0)
+    async def btn_notas(self, interaction: discord.Interaction, button: discord.ui.Button):
+        # Qualquer pessoa pode consultar — a resposta é privada e não
+        # mexe na paginação compartilhada, então não precisa checar autor.
+        select = AnimeSelect(self)
+        select.atualizar_opcoes()
+
+        view_notas = discord.ui.View(timeout=180)
+        view_notas.add_item(select)
+
+        await interaction.response.send_message(
+            "Escolha um anime desta página para ver as notas de cada membro:",
+            view=view_notas,
+            ephemeral=True,
+        )
 
 
 # ──────────────────────────────────────────────────────────────────
@@ -393,7 +487,7 @@ class MalTopCog(commands.Cog):
 
         if not usuarios:
             await interaction.followup.send(
-                "📋 Nenhum usuário monitorado ainda. Use `/mal_entrar` para se adicionar!",
+                "Nenhum usuário monitorado ainda. Use `/mal_entrar` para se adicionar!",
                 ephemeral=True,
             )
             return
@@ -406,7 +500,7 @@ class MalTopCog(commands.Cog):
 
         if not todos_snapshots:
             await interaction.followup.send(
-                "⚠️ Nenhum dado sincronizado ainda. Aguarde a primeira sincronização completar.",
+                "Nenhum dado sincronizado ainda. Aguarde a primeira sincronização completar.",
                 ephemeral=True,
             )
             return
@@ -415,7 +509,7 @@ class MalTopCog(commands.Cog):
 
         if not ranking:
             await interaction.followup.send(
-                "📊 Dados insuficientes para gerar o ranking. "
+                "Dados insuficientes para gerar o ranking. "
                 "É preciso que os membros tenham animes completos com notas em suas listas.",
                 ephemeral=True,
             )
@@ -441,7 +535,7 @@ class MalTopCog(commands.Cog):
     @mal_top_servidor.error
     async def mal_top_servidor_error(self, interaction: discord.Interaction, error):
         await interaction.followup.send(
-            f"❌ Ocorreu um erro ao gerar o ranking: `{error}`", ephemeral=True
+            f"Ocorreu um erro ao gerar o ranking: `{error}`", ephemeral=True
         )
 
 

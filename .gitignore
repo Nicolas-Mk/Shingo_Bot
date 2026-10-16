@@ -58,3 +58,4 @@ migrations/__pycache__/
 scripts/checar_lista_usuario.py
 scripts/mandar_mensagem.py
 scripts/simular_fiscalizacao.py
+scripts/popular_duracao_episodios.py
